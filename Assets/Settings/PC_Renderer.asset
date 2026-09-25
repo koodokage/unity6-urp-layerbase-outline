@@ -15,13 +15,17 @@ MonoBehaviour:
   m_Active: 1
   settings:
     color: {r: 41.73181, g: 1.5996208, b: 0, a: 1}
-    width: 3.55
-    glowRadius: 9.43
+    width: 4.6
+    glowRadius: 2.36
     glowIntensity: 0
     smoothCorners: 1
     layerMask:
       serializedVersion: 2
-      m_Bits: 23
+      m_Bits: 16
+    intersectionEnabled: 0
+    intersectionColor: {r: 1, g: 0, b: 0, a: 1}
+    intersectionThreshold: 11.29
+    intersectionWidth: 7.46
     renderPassEvent: 550
 --- !u!114 &11400000
 MonoBehaviour:

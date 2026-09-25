@@ -10,36 +10,62 @@ public class LightweightOutlineFeature : ScriptableRendererFeature
     public class Settings
     {
         [Header("Outline")]
+
         [ColorUsage(true, true)]
         public Color color = Color.black;
 
         [Min(0.5f)]
         public float width = 1.0f;
 
+
         [Header("Glow")]
+
         [Min(0.0f)]
         public float glowRadius = 2.0f;
 
         [Min(0.0f)]
         public float glowIntensity = 1.0f;
 
+
         [Header("Quality")]
+
         public bool smoothCorners = true;
 
+
         [Header("Layer Mask")]
+
         public LayerMask layerMask = 0;
 
+
+        [Header("Intersection")]
+
+        public bool intersectionEnabled = true;
+
+        [ColorUsage(true, true)]
+        public Color intersectionColor = Color.red;
+
+        [Min(0.0001f)]
+        public float intersectionThreshold = 0.05f;
+
+        [Min(0.5f)]
+        public float intersectionWidth = 1.0f;
+
+
         [Header("Render Pass")]
+
         public RenderPassEvent renderPassEvent =
             RenderPassEvent.BeforeRenderingPostProcessing;
     }
 
+
     public Settings settings = new Settings();
+
 
     private Material outlineMaterial;
     private Material maskMaterial;
 
     private LightweightOutlinePass outlinePass;
+
 
     public override void Create()
     {
@@ -55,11 +81,13 @@ public class LightweightOutlineFeature : ScriptableRendererFeature
             return;
         }
 
+
         outlineMaterial =
             CoreUtils.CreateEngineMaterial(shader);
 
         maskMaterial =
             CoreUtils.CreateEngineMaterial(shader);
+
 
         outlinePass =
             new LightweightOutlinePass(
@@ -67,9 +95,11 @@ public class LightweightOutlineFeature : ScriptableRendererFeature
                 maskMaterial
             );
 
+
         outlinePass.renderPassEvent =
             settings.renderPassEvent;
     }
+
 
     public override void AddRenderPasses(
         ScriptableRenderer renderer,
@@ -78,14 +108,18 @@ public class LightweightOutlineFeature : ScriptableRendererFeature
         if (outlinePass == null)
             return;
 
+
         if (settings.layerMask.value == 0)
             return;
+
 
         if (renderingData.cameraData.isPreviewCamera)
             return;
 
+
         CameraType cameraType =
             renderingData.cameraData.cameraType;
+
 
         if (cameraType != CameraType.Game &&
             cameraType != CameraType.SceneView)
@@ -93,17 +127,25 @@ public class LightweightOutlineFeature : ScriptableRendererFeature
             return;
         }
 
+
         outlinePass.Setup(
             settings.color,
             settings.width,
             settings.glowRadius,
             settings.glowIntensity,
             settings.smoothCorners,
-            settings.layerMask
+            settings.layerMask,
+
+            settings.intersectionEnabled,
+            settings.intersectionColor,
+            settings.intersectionThreshold,
+            settings.intersectionWidth
         );
+
 
         renderer.EnqueuePass(outlinePass);
     }
+
 
     protected override void Dispose(bool disposing)
     {
@@ -113,12 +155,15 @@ public class LightweightOutlineFeature : ScriptableRendererFeature
             outlinePass = null;
         }
 
+
         CoreUtils.Destroy(outlineMaterial);
         CoreUtils.Destroy(maskMaterial);
+
 
         outlineMaterial = null;
         maskMaterial = null;
     }
+
 
     // =============================================================
     // OUTLINE PASS
@@ -129,15 +174,38 @@ public class LightweightOutlineFeature : ScriptableRendererFeature
         private readonly Material outlineMaterial;
         private readonly Material maskMaterial;
 
-        private Color outlineColor;
 
+        private Color outlineColor;
         private float outlineWidth;
+
         private float glowRadius;
         private float glowIntensity;
 
         private bool smoothCorners;
 
         private LayerMask outlineLayerMask;
+
+
+        private bool intersectionEnabled;
+        private Color intersectionColor;
+
+        private float intersectionThreshold;
+        private float intersectionWidth;
+
+
+        // =========================================================
+        // SHADER PROPERTY IDS
+        // =========================================================
+
+        private static readonly int OutlineMaskID =
+            Shader.PropertyToID("_OutlineMask");
+
+        private static readonly int SelectedDepthID =
+            Shader.PropertyToID("_SelectedDepth");
+
+        private static readonly int CameraDepthID =
+            Shader.PropertyToID("_CameraDepthTexture");
+
 
         private static readonly int OutlineColorID =
             Shader.PropertyToID("_OutlineColor");
@@ -154,8 +222,19 @@ public class LightweightOutlineFeature : ScriptableRendererFeature
         private static readonly int SmoothCornersID =
             Shader.PropertyToID("_SmoothCorners");
 
-        private static readonly int OutlineMaskID =
-            Shader.PropertyToID("_OutlineMask");
+
+        private static readonly int IntersectionColorID =
+            Shader.PropertyToID("_IntersectionColor");
+
+        private static readonly int IntersectionThresholdID =
+            Shader.PropertyToID("_IntersectionThreshold");
+
+        private static readonly int IntersectionWidthID =
+            Shader.PropertyToID("_IntersectionWidth");
+
+        private static readonly int IntersectionEnabledID =
+            Shader.PropertyToID("_IntersectionEnabled");
+
 
         // =========================================================
         // MASK PASS DATA
@@ -166,24 +245,47 @@ public class LightweightOutlineFeature : ScriptableRendererFeature
             public RendererListHandle rendererList;
         }
 
+
         // =========================================================
-        // OUTLINE PASS DATA
+        // SELECTED DEPTH PASS DATA
+        // =========================================================
+
+        private class SelectedDepthPassData
+        {
+            public RendererListHandle rendererList;
+        }
+
+
+        // =========================================================
+        // COMPOSITE PASS DATA
         // =========================================================
 
         private class OutlinePassData
         {
             public TextureHandle source;
-            public TextureHandle mask;
             public Material material;
         }
+
+
+        // =========================================================
+        // CONSTRUCTOR
+        // =========================================================
 
         public LightweightOutlinePass(
             Material outlineMaterial,
             Material maskMaterial)
         {
-            this.outlineMaterial = outlineMaterial;
-            this.maskMaterial = maskMaterial;
+            this.outlineMaterial =
+                outlineMaterial;
+
+            this.maskMaterial =
+                maskMaterial;
         }
+
+
+        // =========================================================
+        // SETUP
+        // =========================================================
 
         public void Setup(
             Color color,
@@ -191,29 +293,80 @@ public class LightweightOutlineFeature : ScriptableRendererFeature
             float glowRadius,
             float glowIntensity,
             bool smoothCorners,
-            LayerMask layerMask)
+            LayerMask layerMask,
+
+            bool intersectionEnabled,
+            Color intersectionColor,
+            float intersectionThreshold,
+            float intersectionWidth)
         {
-            outlineColor = color;
+            outlineColor =
+                color;
 
             outlineWidth =
-                Mathf.Max(0.5f, width);
+                Mathf.Max(
+                    0.5f,
+                    width
+                );
+
 
             this.glowRadius =
-                Mathf.Max(0.0f, glowRadius);
+                Mathf.Max(
+                    0.0f,
+                    glowRadius
+                );
+
 
             this.glowIntensity =
-                Mathf.Max(0.0f, glowIntensity);
+                Mathf.Max(
+                    0.0f,
+                    glowIntensity
+                );
+
 
             this.smoothCorners =
                 smoothCorners;
 
+
             outlineLayerMask =
                 layerMask;
+
+
+            this.intersectionEnabled =
+                intersectionEnabled;
+
+
+            this.intersectionColor =
+                intersectionColor;
+
+
+            this.intersectionThreshold =
+                Mathf.Max(
+                    0.0001f,
+                    intersectionThreshold
+                );
+
+
+            this.intersectionWidth =
+                Mathf.Max(
+                    0.5f,
+                    intersectionWidth
+                );
         }
+
+
+        // =========================================================
+        // DISPOSE
+        // =========================================================
 
         public void Dispose()
         {
         }
+
+
+        // =========================================================
+        // RENDER GRAPH
+        // =========================================================
 
         public override void RecordRenderGraph(
             RenderGraph renderGraph,
@@ -222,29 +375,42 @@ public class LightweightOutlineFeature : ScriptableRendererFeature
             UniversalResourceData resourceData =
                 frameData.Get<UniversalResourceData>();
 
+
             UniversalRenderingData renderingData =
                 frameData.Get<UniversalRenderingData>();
+
 
             UniversalCameraData cameraData =
                 frameData.Get<UniversalCameraData>();
 
+
             UniversalLightData lightData =
                 frameData.Get<UniversalLightData>();
+
+
+            // =====================================================
+            // SOURCE
+            // =====================================================
 
             TextureHandle source =
                 resourceData.activeColorTexture;
 
-            TextureHandle depth =
-                resourceData.activeDepthTexture;
 
             // =====================================================
-            // BACK BUFFER CHECK
+            // CAMERA DEPTH
+            // =====================================================
+
+            TextureHandle cameraDepth =
+                resourceData.activeDepthTexture;
+
+
+            // =====================================================
+            // BACK BUFFER
             // =====================================================
 
             if (resourceData.isActiveTargetBackBuffer)
-            {
                 return;
-            }
+
 
             // =====================================================
             // MASK TEXTURE
@@ -253,18 +419,16 @@ public class LightweightOutlineFeature : ScriptableRendererFeature
             RenderTextureDescriptor maskDescriptor =
                 cameraData.cameraTargetDescriptor;
 
-            maskDescriptor.width =
-                cameraData.cameraTargetDescriptor.width;
-
-            maskDescriptor.height =
-                cameraData.cameraTargetDescriptor.height;
 
             maskDescriptor.msaaSamples = 1;
+
             maskDescriptor.depthBufferBits = 0;
+
             maskDescriptor.colorFormat =
                 RenderTextureFormat.R8;
 
             maskDescriptor.sRGB = false;
+
 
             TextureHandle maskTexture =
                 UniversalRenderer.CreateRenderGraphTexture(
@@ -274,8 +438,59 @@ public class LightweightOutlineFeature : ScriptableRendererFeature
                     false
                 );
 
+
             // =====================================================
-            // RENDERER LIST
+            // SELECTED DEPTH TEXTURE
+            // =====================================================
+
+      // =============================================================
+// SELECTED DEPTH COLOR
+// =============================================================
+
+RenderTextureDescriptor selectedDepthColorDescriptor =
+    cameraData.cameraTargetDescriptor;
+
+selectedDepthColorDescriptor.msaaSamples = 1;
+selectedDepthColorDescriptor.depthBufferBits = 0;
+selectedDepthColorDescriptor.colorFormat =
+    RenderTextureFormat.RFloat;
+selectedDepthColorDescriptor.sRGB = false;
+
+
+TextureHandle selectedDepthColor =
+    UniversalRenderer.CreateRenderGraphTexture(
+        renderGraph,
+        selectedDepthColorDescriptor,
+        "Lightweight Outline Selected Depth Color",
+        false
+    );
+
+
+// =============================================================
+// SELECTED DEPTH BUFFER
+// =============================================================
+
+RenderTextureDescriptor selectedDepthBufferDescriptor =
+    cameraData.cameraTargetDescriptor;
+
+selectedDepthBufferDescriptor.msaaSamples = 1;
+selectedDepthBufferDescriptor.colorFormat =
+    RenderTextureFormat.Depth;
+selectedDepthBufferDescriptor.depthBufferBits = 32;
+selectedDepthBufferDescriptor.sRGB = false;
+
+
+TextureHandle selectedDepthBuffer =
+    UniversalRenderer.CreateRenderGraphTexture(
+        renderGraph,
+        selectedDepthBufferDescriptor,
+        "Lightweight Outline Selected Depth Buffer",
+        false
+    );
+
+
+            // =====================================================
+            // FILTERING
             // =====================================================
 
             FilteringSettings filteringSettings =
@@ -284,8 +499,10 @@ public class LightweightOutlineFeature : ScriptableRendererFeature
                     outlineLayerMask
                 );
 
+
             SortingCriteria sortingCriteria =
                 cameraData.defaultOpaqueSortFlags;
+
 
             List<ShaderTagId> shaderTags =
                 new List<ShaderTagId>
@@ -294,6 +511,7 @@ public class LightweightOutlineFeature : ScriptableRendererFeature
                     new ShaderTagId("UniversalForwardOnly"),
                     new ShaderTagId("SRPDefaultUnlit")
                 };
+
 
             DrawingSettings drawingSettings =
                 RenderingUtils.CreateDrawingSettings(
@@ -304,23 +522,56 @@ public class LightweightOutlineFeature : ScriptableRendererFeature
                     sortingCriteria
                 );
 
+
+            // =====================================================
+            // MASK RENDERER LIST
+            // =====================================================
+
             drawingSettings.overrideMaterial =
                 maskMaterial;
 
             drawingSettings.overrideMaterialPassIndex =
                 0;
 
-            RendererListParams rendererListParams =
+
+            RendererListParams maskRendererListParams =
                 new RendererListParams(
                     renderingData.cullResults,
                     drawingSettings,
                     filteringSettings
                 );
 
-            RendererListHandle rendererList =
+
+            RendererListHandle maskRendererList =
                 renderGraph.CreateRendererList(
-                    rendererListParams
+                    maskRendererListParams
                 );
+
+
+            // =====================================================
+            // SELECTED DEPTH RENDERER LIST
+            // =====================================================
+
+            drawingSettings.overrideMaterial =
+                maskMaterial;
+
+            drawingSettings.overrideMaterialPassIndex =
+                1;
+
+
+            RendererListParams selectedDepthRendererListParams =
+                new RendererListParams(
+                    renderingData.cullResults,
+                    drawingSettings,
+                    filteringSettings
+                );
+
+
+            RendererListHandle selectedDepthRendererList =
+                renderGraph.CreateRendererList(
+                    selectedDepthRendererListParams
+                );
+
 
             // =====================================================
             // MASK PASS
@@ -335,11 +586,13 @@ public class LightweightOutlineFeature : ScriptableRendererFeature
             )
             {
                 passData.rendererList =
-                    rendererList;
+                    maskRendererList;
+
 
                 builder.UseRendererList(
                     passData.rendererList
                 );
+
 
                 builder.SetRenderAttachment(
                     maskTexture,
@@ -347,12 +600,30 @@ public class LightweightOutlineFeature : ScriptableRendererFeature
                     AccessFlags.Write
                 );
 
+
+                /*
+                 * Use the actual camera depth.
+                 *
+                 * Objects outside the LayerMask can therefore
+                 * occlude the selected object.
+                 */
                 builder.SetRenderAttachmentDepth(
-                    depth,
+                    cameraDepth,
                     AccessFlags.Read
                 );
 
+
+                /*
+                 * Make the mask available to later passes.
+                 */
+                builder.SetGlobalTextureAfterPass(
+                    maskTexture,
+                    OutlineMaskID
+                );
+
+
                 builder.AllowPassCulling(false);
+
 
                 builder.SetRenderFunc(
                     static (
@@ -366,12 +637,88 @@ public class LightweightOutlineFeature : ScriptableRendererFeature
                             Color.black
                         );
 
+
                         context.cmd.DrawRendererList(
                             data.rendererList
                         );
                     }
                 );
             }
+
+
+          // =============================================================
+// SELECTED DEPTH PASS
+// =============================================================
+
+using (
+    var builder =
+        renderGraph.AddRasterRenderPass<SelectedDepthPassData>(
+            "Lightweight Outline - Selected Depth",
+            out var passData
+        )
+)
+{
+    passData.rendererList =
+        selectedDepthRendererList;
+
+
+    builder.UseRendererList(
+        passData.rendererList
+    );
+
+
+    // RFloat color target
+    builder.SetRenderAttachment(
+        selectedDepthColor,
+        0,
+        AccessFlags.Write
+    );
+
+
+    // Separate hardware depth buffer
+    builder.SetRenderAttachmentDepth(
+        selectedDepthBuffer,
+        AccessFlags.Write
+    );
+
+
+    // Selected object's linear depth
+    builder.SetGlobalTextureAfterPass(
+        selectedDepthColor,
+        SelectedDepthID
+    );
+
+
+    // Camera depth
+    builder.SetGlobalTextureAfterPass(
+        cameraDepth,
+        CameraDepthID
+    );
+
+
+    builder.AllowPassCulling(false);
+
+
+    builder.SetRenderFunc(
+        static (
+            SelectedDepthPassData data,
+            RasterGraphContext context
+        ) =>
+        {
+            context.cmd.ClearRenderTarget(
+                true,
+                true,
+                Color.clear
+            );
+
+
+            context.cmd.DrawRendererList(
+                data.rendererList
+            );
+        }
+    );
+}
+
 
             // =====================================================
             // DESTINATION
@@ -380,8 +727,11 @@ public class LightweightOutlineFeature : ScriptableRendererFeature
             RenderTextureDescriptor destinationDescriptor =
                 cameraData.cameraTargetDescriptor;
 
+
             destinationDescriptor.msaaSamples = 1;
+
             destinationDescriptor.depthBufferBits = 0;
+
 
             TextureHandle destination =
                 UniversalRenderer.CreateRenderGraphTexture(
@@ -391,8 +741,9 @@ public class LightweightOutlineFeature : ScriptableRendererFeature
                     false
                 );
 
+
             // =====================================================
-            // MATERIAL PARAMETERS
+            // MATERIAL SETTINGS
             // =====================================================
 
             outlineMaterial.SetColor(
@@ -400,28 +751,61 @@ public class LightweightOutlineFeature : ScriptableRendererFeature
                 outlineColor
             );
 
+
             outlineMaterial.SetFloat(
                 OutlineWidthID,
                 outlineWidth
             );
+
 
             outlineMaterial.SetFloat(
                 GlowRadiusID,
                 glowRadius
             );
 
+
             outlineMaterial.SetFloat(
                 GlowIntensityID,
                 glowIntensity
             );
 
+
             outlineMaterial.SetFloat(
                 SmoothCornersID,
-                smoothCorners ? 1.0f : 0.0f
+                smoothCorners
+                    ? 1.0f
+                    : 0.0f
             );
 
+
+            outlineMaterial.SetColor(
+                IntersectionColorID,
+                intersectionColor
+            );
+
+
+            outlineMaterial.SetFloat(
+                IntersectionThresholdID,
+                intersectionThreshold
+            );
+
+
+            outlineMaterial.SetFloat(
+                IntersectionWidthID,
+                intersectionWidth
+            );
+
+
+            outlineMaterial.SetFloat(
+                IntersectionEnabledID,
+                intersectionEnabled
+                    ? 1.0f
+                    : 0.0f
+            );
+
+
             // =====================================================
-            // FULLSCREEN OUTLINE
+            // COMPOSITE PASS
             // =====================================================
 
             using (
@@ -435,21 +819,37 @@ public class LightweightOutlineFeature : ScriptableRendererFeature
                 passData.source =
                     source;
 
-                passData.mask =
-                    maskTexture;
-
                 passData.material =
                     outlineMaterial;
+
 
                 builder.UseTexture(
                     passData.source,
                     AccessFlags.Read
                 );
 
-                builder.UseTexture(
-                    passData.mask,
+
+                /*
+                 * These were registered as global textures
+                 * in the previous passes.
+                 */
+                builder.UseGlobalTexture(
+                    OutlineMaskID,
                     AccessFlags.Read
                 );
+
+
+                builder.UseGlobalTexture(
+                    SelectedDepthID,
+                    AccessFlags.Read
+                );
+
+
+                builder.UseGlobalTexture(
+                    CameraDepthID,
+                    AccessFlags.Read
+                );
+
 
                 builder.SetRenderAttachment(
                     destination,
@@ -457,7 +857,9 @@ public class LightweightOutlineFeature : ScriptableRendererFeature
                     AccessFlags.Write
                 );
 
+
                 builder.AllowPassCulling(false);
+
 
                 builder.SetRenderFunc(
                     static (
@@ -465,11 +867,17 @@ public class LightweightOutlineFeature : ScriptableRendererFeature
                         RasterGraphContext context
                     ) =>
                     {
-                        data.material.SetTexture(
-                            OutlineMaskID,
-                            data.mask
-                        );
-
+                        /*
+                         * No context.resources.
+                         *
+                         * No SetTexture().
+                         *
+                         * RenderGraph has already bound:
+                         *
+                         * _OutlineMask
+                         * _SelectedDepth
+                         * _CameraDepthTexture
+                         */
                         Blitter.BlitTexture(
                             context.cmd,
                             data.source,
@@ -480,11 +888,12 @@ public class LightweightOutlineFeature : ScriptableRendererFeature
                                 0f
                             ),
                             data.material,
-                            1
+                            2
                         );
                     }
                 );
             }
+
 
             // =====================================================
             // FINAL CAMERA COLOR

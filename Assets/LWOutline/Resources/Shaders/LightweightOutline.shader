@@ -7,6 +7,7 @@ Shader "Hidden/Lightweight Outline"
             "RenderPipeline" = "UniversalPipeline"
         }
 
+
         // =========================================================
         // PASS 0
         // MASK
@@ -22,36 +23,43 @@ Shader "Hidden/Lightweight Outline"
 
             Blend One Zero
 
+
             HLSLPROGRAM
 
             #pragma vertex MaskVertex
             #pragma fragment MaskFragment
 
+
             #include "Packages/com.unity.render-pipelines.universal/ShaderLibrary/Core.hlsl"
+
 
             struct MaskAttributes
             {
                 float4 positionOS : POSITION;
             };
 
+
             struct MaskVaryings
             {
                 float4 positionCS : SV_POSITION;
             };
 
+
             MaskVaryings MaskVertex(
-                MaskAttributes input
-            )
+                MaskAttributes input)
             {
                 MaskVaryings output;
+
 
                 output.positionCS =
                     TransformObjectToHClip(
                         input.positionOS.xyz
                     );
 
+
                 return output;
             }
+
 
             half4 MaskFragment(
                 MaskVaryings input
@@ -65,12 +73,109 @@ Shader "Hidden/Lightweight Outline"
                 );
             }
 
+
             ENDHLSL
         }
 
+
         // =========================================================
         // PASS 1
-        // OUTLINE
+        // SELECTED DEPTH
+        // =========================================================
+
+        Pass
+        {
+            Name "Selected Depth"
+
+            /*
+             * IMPORTANT
+             *
+             * This depth pass is NOT testing against the
+             * camera depth.
+             *
+             * We need the actual depth of the selected object
+             * even when another object is in front of it.
+             */
+
+            ZWrite On
+            ZTest LEqual
+
+            Cull Back
+
+            Blend One Zero
+
+
+            HLSLPROGRAM
+
+            #pragma vertex SelectedDepthVertex
+            #pragma fragment SelectedDepthFragment
+
+
+            #include "Packages/com.unity.render-pipelines.universal/ShaderLibrary/Core.hlsl"
+
+
+            struct DepthAttributes
+            {
+                float4 positionOS : POSITION;
+            };
+
+
+            struct DepthVaryings
+            {
+                float4 positionCS : SV_POSITION;
+            };
+
+
+            DepthVaryings SelectedDepthVertex(
+                DepthAttributes input)
+            {
+                DepthVaryings output;
+
+
+                output.positionCS =
+                    TransformObjectToHClip(
+                        input.positionOS.xyz
+                    );
+
+
+                return output;
+            }
+
+
+            float SelectedDepthFragment(
+                DepthVaryings input
+            ) : SV_Target
+            {
+                /*
+                 * Convert the selected object's depth
+                 * into linear eye depth.
+                 *
+                 * This gives us a world-like distance
+                 * along the camera view direction.
+                 */
+                float rawDepth =
+                    input.positionCS.z /
+                    input.positionCS.w;
+
+
+                float linearDepth =
+                    LinearEyeDepth(
+                        rawDepth,
+                        _ZBufferParams
+                    );
+
+
+                return linearDepth;
+            }
+
+
+            ENDHLSL
+        }
+
+
+        // =========================================================
+        // PASS 2
+        // FULLSCREEN COMPOSITE
         // =========================================================
 
         Pass
@@ -83,12 +188,15 @@ Shader "Hidden/Lightweight Outline"
 
             Blend One Zero
 
+
             HLSLPROGRAM
 
             #pragma vertex Vert
             #pragma fragment Frag
 
+
             #include "Packages/com.unity.render-pipelines.universal/ShaderLibrary/Core.hlsl"
+
 
             // =====================================================
             // TEXTURES
@@ -98,6 +206,15 @@ Shader "Hidden/Lightweight Outline"
 
             TEXTURE2D_X(_OutlineMask);
             SAMPLER(sampler_OutlineMask);
+
+
+            TEXTURE2D_X(_SelectedDepth);
+            SAMPLER(sampler_SelectedDepth);
+
+
+            TEXTURE2D_X(_CameraDepthTexture);
+            SAMPLER(sampler_CameraDepthTexture);
+
 
             // =====================================================
             // PARAMETERS
@@ -113,6 +230,16 @@ Shader "Hidden/Lightweight Outline"
 
             float _SmoothCorners;
 
+
+            float4 _IntersectionColor;
+
+            float _IntersectionThreshold;
+
+            float _IntersectionWidth;
+
+            float _IntersectionEnabled;
+
+
             // =====================================================
             // FULLSCREEN TRIANGLE
             // =====================================================
@@ -122,33 +249,39 @@ Shader "Hidden/Lightweight Outline"
                 uint vertexID : SV_VertexID;
             };
 
+
             struct Varyings
             {
                 float4 positionCS : SV_POSITION;
+
                 float2 uv : TEXCOORD0;
             };
 
+
             Varyings Vert(
-                Attributes input
-            )
+                Attributes input)
             {
                 Varyings output;
+
 
                 output.positionCS =
                     GetFullScreenTriangleVertexPosition(
                         input.vertexID
                     );
 
+
                 output.uv =
                     GetFullScreenTriangleTexCoord(
                         input.vertexID
                     );
 
+
                 return output;
             }
 
+
             // =====================================================
-            // MASK SAMPLE
+            // MASK
             // =====================================================
 
             half SampleMask(float2 uv)
@@ -160,17 +293,53 @@ Shader "Hidden/Lightweight Outline"
                 ).r;
             }
 
+
             // =====================================================
-            // OUTLINE SAMPLE
+            // SELECTED DEPTH
+            // =====================================================
+
+            float SampleSelectedDepth(float2 uv)
+            {
+                return SAMPLE_TEXTURE2D_X(
+                    _SelectedDepth,
+                    sampler_SelectedDepth,
+                    uv
+                ).r;
+            }
+
+
+            // =====================================================
+            // CAMERA DEPTH
+            // =====================================================
+
+            float SampleCameraDepth(float2 uv)
+            {
+                float rawDepth =
+                    SAMPLE_TEXTURE2D_X(
+                        _CameraDepthTexture,
+                        sampler_CameraDepthTexture,
+                        uv
+                    ).r;
+
+
+                return LinearEyeDepth(
+                    rawDepth,
+                    _ZBufferParams
+                );
+            }
+
+
+            // =====================================================
+            // NORMAL OUTLINE
             // =====================================================
 
             half GetOutline(
                 float2 uv,
-                float2 pixelSize
-            )
+                float2 pixelSize)
             {
                 half center =
                     SampleMask(uv);
+
 
                 // -------------------------------------------------
                 // BASIC 4 DIRECTIONS
@@ -185,6 +354,7 @@ Shader "Hidden/Lightweight Outline"
                         )
                     );
 
+
                 half south =
                     SampleMask(
                         uv +
@@ -193,6 +363,7 @@ Shader "Hidden/Lightweight Outline"
                             -pixelSize.y
                         )
                     );
+
 
                 half east =
                     SampleMask(
@@ -203,6 +374,7 @@ Shader "Hidden/Lightweight Outline"
                         )
                     );
 
+
                 half west =
                     SampleMask(
                         uv +
@@ -211,6 +383,7 @@ Shader "Hidden/Lightweight Outline"
                             0.0
                         )
                     );
+
 
                 half surrounding =
                     max(
@@ -223,6 +396,7 @@ Shader "Hidden/Lightweight Outline"
                             west
                         )
                     );
+
 
                 // -------------------------------------------------
                 // DIAGONALS
@@ -237,6 +411,7 @@ Shader "Hidden/Lightweight Outline"
                         )
                     );
 
+
                 half northWest =
                     SampleMask(
                         uv +
@@ -245,6 +420,7 @@ Shader "Hidden/Lightweight Outline"
                             pixelSize.y
                         )
                     );
+
 
                 half southEast =
                     SampleMask(
@@ -255,6 +431,7 @@ Shader "Hidden/Lightweight Outline"
                         )
                     );
 
+
                 half southWest =
                     SampleMask(
                         uv +
@@ -263,6 +440,7 @@ Shader "Hidden/Lightweight Outline"
                             -pixelSize.y
                         )
                     );
+
 
                 half diagonal =
                     max(
@@ -276,8 +454,9 @@ Shader "Hidden/Lightweight Outline"
                         )
                     );
 
+
                 // -------------------------------------------------
-                // SMOOTH CORNER MODE
+                // SMOOTH CORNERS
                 // -------------------------------------------------
 
                 half diagonalWeight =
@@ -287,14 +466,17 @@ Shader "Hidden/Lightweight Outline"
                         _SmoothCorners
                     );
 
+
                 surrounding =
                     max(
                         surrounding,
-                        diagonal * diagonalWeight
+                        diagonal *
+                        diagonalWeight
                     );
 
+
                 // -------------------------------------------------
-                // OUTLINE ONLY OUTSIDE
+                // OUTSIDE ONLY
                 // -------------------------------------------------
 
                 return saturate(
@@ -302,14 +484,14 @@ Shader "Hidden/Lightweight Outline"
                 );
             }
 
+
             // =====================================================
             // GLOW
             // =====================================================
 
             half GetGlow(
                 float2 uv,
-                float2 pixelSize
-            )
+                float2 pixelSize)
             {
                 if (_GlowRadius <= 0.0 ||
                     _GlowIntensity <= 0.0)
@@ -317,14 +499,14 @@ Shader "Hidden/Lightweight Outline"
                     return 0.0;
                 }
 
+
                 float2 stepSize =
-                    pixelSize * _GlowRadius;
+                    pixelSize *
+                    _GlowRadius;
+
 
                 half glow = 0.0;
 
-                // -------------------------------------------------
-                // 8 SAMPLE GLOW
-                // -------------------------------------------------
 
                 glow += SampleMask(
                     uv +
@@ -334,6 +516,7 @@ Shader "Hidden/Lightweight Outline"
                     )
                 );
 
+
                 glow += SampleMask(
                     uv +
                     float2(
@@ -342,6 +525,7 @@ Shader "Hidden/Lightweight Outline"
                     )
                 );
 
+
                 glow += SampleMask(
                     uv +
                     float2(
@@ -350,6 +534,7 @@ Shader "Hidden/Lightweight Outline"
                     )
                 );
 
+
                 glow += SampleMask(
                     uv +
                     float2(
@@ -357,6 +542,7 @@ Shader "Hidden/Lightweight Outline"
                         -stepSize.y
                     )
                 );
+
 
                 glow += SampleMask(
                     uv +
@@ -366,6 +552,7 @@ Shader "Hidden/Lightweight Outline"
                     )
                 );
 
+
                 glow += SampleMask(
                     uv +
                     float2(
@@ -373,6 +560,7 @@ Shader "Hidden/Lightweight Outline"
                         stepSize.y
                     )
                 );
+
 
                 glow += SampleMask(
                     uv +
@@ -382,6 +570,7 @@ Shader "Hidden/Lightweight Outline"
                     )
                 );
 
+
                 glow += SampleMask(
                     uv +
                     float2(
@@ -389,12 +578,253 @@ Shader "Hidden/Lightweight Outline"
                         -stepSize.y
                     )
                 );
+
 
                 glow *= 0.125;
 
+
                 return glow *
-                    _GlowIntensity;
+                       _GlowIntensity;
             }
+
+
+            // =====================================================
+            // INTERSECTION MASK
+            // =====================================================
+
+            half GetIntersection(
+                float2 uv)
+            {
+                if (_IntersectionEnabled <= 0.0)
+                    return 0.0;
+
+
+                float selectedDepth =
+                    SampleSelectedDepth(uv);
+
+
+                /*
+                 * No selected object at this pixel.
+                 */
+                if (selectedDepth <= 0.0001)
+                    return 0.0;
+
+
+                float sceneDepth =
+                    SampleCameraDepth(uv);
+
+
+                /*
+                 * Another object must be in front
+                 * of the selected object.
+                 *
+                 * Example:
+                 *
+                 * sceneDepth    = 9.98
+                 * selectedDepth = 10.00
+                 *
+                 * Difference    = 0.02
+                 */
+                float depthDifference =
+                    selectedDepth -
+                    sceneDepth;
+
+
+                /*
+                 * If the selected object is not behind
+                 * the camera-visible surface, this isn't
+                 * an intersection.
+                 */
+                if (depthDifference <= 0.0)
+                    return 0.0;
+
+
+                /*
+                 * Only detect surfaces that are close
+                 * enough to each other.
+                 *
+                 * This prevents a completely hidden object
+                 * from getting an outline across its entire
+                 * surface.
+                 */
+                float intersection =
+                    1.0 -
+                    smoothstep(
+                        0.0,
+                        _IntersectionThreshold,
+                        depthDifference
+                    );
+
+
+                return intersection;
+            }
+
+
+            // =====================================================
+            // INTERSECTION EDGE
+            // =====================================================
+
+            half GetIntersectionEdge(
+                float2 uv,
+                float2 pixelSize)
+            {
+                if (_IntersectionEnabled <= 0.0)
+                    return 0.0;
+
+
+                half center =
+                    GetIntersection(uv);
+
+
+                /*
+                 * If there is no intersection at the center,
+                 * still check surrounding pixels.
+                 */
+                half north =
+                    GetIntersection(
+                        uv +
+                        float2(
+                            0.0,
+                            pixelSize.y *
+                            _IntersectionWidth
+                        )
+                    );
+
+
+                half south =
+                    GetIntersection(
+                        uv +
+                        float2(
+                            0.0,
+                            -pixelSize.y *
+                            _IntersectionWidth
+                        )
+                    );
+
+
+                half east =
+                    GetIntersection(
+                        uv +
+                        float2(
+                            pixelSize.x *
+                            _IntersectionWidth,
+                            0.0
+                        )
+                    );
+
+
+                half west =
+                    GetIntersection(
+                        uv +
+                        float2(
+                            -pixelSize.x *
+                            _IntersectionWidth,
+                            0.0
+                        )
+                    );
+
+
+                half northEast =
+                    GetIntersection(
+                        uv +
+                        float2(
+                            pixelSize.x *
+                            _IntersectionWidth,
+                            pixelSize.y *
+                            _IntersectionWidth
+                        )
+                    );
+
+
+                half northWest =
+                    GetIntersection(
+                        uv +
+                        float2(
+                            -pixelSize.x *
+                            _IntersectionWidth,
+                            pixelSize.y *
+                            _IntersectionWidth
+                        )
+                    );
+
+
+                half southEast =
+                    GetIntersection(
+                        uv +
+                        float2(
+                            pixelSize.x *
+                            _IntersectionWidth,
+                            -pixelSize.y *
+                            _IntersectionWidth
+                        )
+                    );
+
+
+                half southWest =
+                    GetIntersection(
+                        uv +
+                        float2(
+                            -pixelSize.x *
+                            _IntersectionWidth,
+                            -pixelSize.y *
+                            _IntersectionWidth
+                        )
+                    );
+
+
+                half surrounding =
+                    max(
+                        max(
+                            north,
+                            south
+                        ),
+                        max(
+                            east,
+                            west
+                        )
+                    );
+
+
+                surrounding =
+                    max(
+                        surrounding,
+                        max(
+                            max(
+                                northEast,
+                                northWest
+                            ),
+                            max(
+                                southEast,
+                                southWest
+                            )
+                        )
+                    );
+
+
+                /*
+                 * Only the border of the intersection region.
+                 */
+                half edge =
+                    saturate(
+                        surrounding -
+                        center
+                    );
+
+
+                /*
+                 * If the intersection itself is very thin,
+                 * keep the center visible too.
+                 */
+                edge =
+                    max(
+                        edge,
+                        center * 0.5
+                    );
+
+
+                return edge;
+            }
+
 
             // =====================================================
             // FRAGMENT
@@ -407,6 +837,7 @@ Shader "Hidden/Lightweight Outline"
                 float2 uv =
                     input.uv;
 
+
                 // -------------------------------------------------
                 // SCENE
                 // -------------------------------------------------
@@ -418,6 +849,7 @@ Shader "Hidden/Lightweight Outline"
                         uv
                     );
 
+
                 // -------------------------------------------------
                 // PIXEL SIZE
                 // -------------------------------------------------
@@ -426,19 +858,22 @@ Shader "Hidden/Lightweight Outline"
                     1.0 /
                     _ScreenParams.xy;
 
+
                 // -------------------------------------------------
-                // OUTLINE
+                // NORMAL OUTLINE
                 // -------------------------------------------------
 
                 float2 outlinePixelSize =
                     pixelSize *
                     _OutlineWidth;
 
+
                 half outline =
                     GetOutline(
                         uv,
                         outlinePixelSize
                     );
+
 
                 // -------------------------------------------------
                 // GLOW
@@ -450,40 +885,68 @@ Shader "Hidden/Lightweight Outline"
                         pixelSize
                     );
 
-                // Glow should not overpower the actual outline.
+
+                /*
+                 * Glow should not overpower the
+                 * actual outline.
+                 */
                 glow *=
                     (1.0 - outline);
 
-                // -------------------------------------------------
-                // HDR OUTLINE
-                // -------------------------------------------------
-
-                half3 outlineColor =
-                    _OutlineColor.rgb;
 
                 // -------------------------------------------------
-                // COMPOSITE
+                // INTERSECTION
+                // -------------------------------------------------
+
+                half intersection =
+                    GetIntersectionEdge(
+                        uv,
+                        pixelSize
+                    );
+
+
+                // -------------------------------------------------
+                // RESULT
                 // -------------------------------------------------
 
                 half3 result =
                     sceneColor.rgb;
 
-                // Main outline.
+
+                // -------------------------------------------------
+                // NORMAL OUTLINE
+                // -------------------------------------------------
+
                 result =
                     lerp(
                         result,
-                        outlineColor,
+                        _OutlineColor.rgb,
                         outline *
                         _OutlineColor.a
                     );
 
-                // HDR glow.
-                //
-                // Additive instead of lerp.
-                // This allows values > 1.0 to reach Bloom.
+
+                // -------------------------------------------------
+                // INTERSECTION OUTLINE
+                // -------------------------------------------------
+
+                result =
+                    lerp(
+                        result,
+                        _IntersectionColor.rgb,
+                        intersection *
+                        _IntersectionColor.a
+                    );
+
+
+                // -------------------------------------------------
+                // GLOW
+                // -------------------------------------------------
+
                 result +=
-                    outlineColor *
+                    _OutlineColor.rgb *
                     glow;
+
 
                 return half4(
                     result,
@@ -491,9 +954,11 @@ Shader "Hidden/Lightweight Outline"
                 );
             }
 
+
             ENDHLSL
         }
     }
+
 
     FallBack Off
 }
