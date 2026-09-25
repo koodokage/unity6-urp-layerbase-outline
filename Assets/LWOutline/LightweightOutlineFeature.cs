@@ -10,10 +10,21 @@ public class LightweightOutlineFeature : ScriptableRendererFeature
     public class Settings
     {
         [Header("Outline")]
+        [ColorUsage(true, true)]
         public Color color = Color.black;
 
         [Min(0.5f)]
         public float width = 1.0f;
+
+        [Header("Glow")]
+        [Min(0.0f)]
+        public float glowRadius = 2.0f;
+
+        [Min(0.0f)]
+        public float glowIntensity = 1.0f;
+
+        [Header("Quality")]
+        public bool smoothCorners = true;
 
         [Header("Layer Mask")]
         public LayerMask layerMask = 0;
@@ -27,31 +38,37 @@ public class LightweightOutlineFeature : ScriptableRendererFeature
 
     private Material outlineMaterial;
     private Material maskMaterial;
+
     private LightweightOutlinePass outlinePass;
 
     public override void Create()
     {
-        Shader shader = Shader.Find("Hidden/Lightweight Outline");
+        Shader shader =
+            Shader.Find("Hidden/Lightweight Outline");
 
         if (shader == null)
         {
             Debug.LogError(
-                "Lightweight Outline shader not found. " +
-                "Make sure LightweightOutline.shader exists."
+                "Lightweight Outline shader not found."
             );
 
             return;
         }
 
-        outlineMaterial = CoreUtils.CreateEngineMaterial(shader);
-        maskMaterial = CoreUtils.CreateEngineMaterial(shader);
+        outlineMaterial =
+            CoreUtils.CreateEngineMaterial(shader);
 
-        outlinePass = new LightweightOutlinePass(
-            outlineMaterial,
-            maskMaterial
-        );
+        maskMaterial =
+            CoreUtils.CreateEngineMaterial(shader);
 
-        outlinePass.renderPassEvent = settings.renderPassEvent;
+        outlinePass =
+            new LightweightOutlinePass(
+                outlineMaterial,
+                maskMaterial
+            );
+
+        outlinePass.renderPassEvent =
+            settings.renderPassEvent;
     }
 
     public override void AddRenderPasses(
@@ -67,9 +84,11 @@ public class LightweightOutlineFeature : ScriptableRendererFeature
         if (renderingData.cameraData.isPreviewCamera)
             return;
 
-        // Avoid rendering on reflection / preview cameras.
-        if (renderingData.cameraData.cameraType != CameraType.Game &&
-            renderingData.cameraData.cameraType != CameraType.SceneView)
+        CameraType cameraType =
+            renderingData.cameraData.cameraType;
+
+        if (cameraType != CameraType.Game &&
+            cameraType != CameraType.SceneView)
         {
             return;
         }
@@ -77,6 +96,9 @@ public class LightweightOutlineFeature : ScriptableRendererFeature
         outlinePass.Setup(
             settings.color,
             settings.width,
+            settings.glowRadius,
+            settings.glowIntensity,
+            settings.smoothCorners,
             settings.layerMask
         );
 
@@ -98,13 +120,23 @@ public class LightweightOutlineFeature : ScriptableRendererFeature
         maskMaterial = null;
     }
 
+    // =============================================================
+    // OUTLINE PASS
+    // =============================================================
+
     private class LightweightOutlinePass : ScriptableRenderPass
     {
         private readonly Material outlineMaterial;
         private readonly Material maskMaterial;
 
         private Color outlineColor;
+
         private float outlineWidth;
+        private float glowRadius;
+        private float glowIntensity;
+
+        private bool smoothCorners;
+
         private LayerMask outlineLayerMask;
 
         private static readonly int OutlineColorID =
@@ -113,21 +145,30 @@ public class LightweightOutlineFeature : ScriptableRendererFeature
         private static readonly int OutlineWidthID =
             Shader.PropertyToID("_OutlineWidth");
 
+        private static readonly int GlowRadiusID =
+            Shader.PropertyToID("_GlowRadius");
+
+        private static readonly int GlowIntensityID =
+            Shader.PropertyToID("_GlowIntensity");
+
+        private static readonly int SmoothCornersID =
+            Shader.PropertyToID("_SmoothCorners");
+
         private static readonly int OutlineMaskID =
             Shader.PropertyToID("_OutlineMask");
 
-        // ---------------------------------------------------------
+        // =========================================================
         // MASK PASS DATA
-        // ---------------------------------------------------------
+        // =========================================================
 
         private class MaskPassData
         {
             public RendererListHandle rendererList;
         }
 
-        // ---------------------------------------------------------
+        // =========================================================
         // OUTLINE PASS DATA
-        // ---------------------------------------------------------
+        // =========================================================
 
         private class OutlinePassData
         {
@@ -147,11 +188,27 @@ public class LightweightOutlineFeature : ScriptableRendererFeature
         public void Setup(
             Color color,
             float width,
+            float glowRadius,
+            float glowIntensity,
+            bool smoothCorners,
             LayerMask layerMask)
         {
             outlineColor = color;
-            outlineWidth = Mathf.Max(0.5f, width);
-            outlineLayerMask = layerMask;
+
+            outlineWidth =
+                Mathf.Max(0.5f, width);
+
+            this.glowRadius =
+                Mathf.Max(0.0f, glowRadius);
+
+            this.glowIntensity =
+                Mathf.Max(0.0f, glowIntensity);
+
+            this.smoothCorners =
+                smoothCorners;
+
+            outlineLayerMask =
+                layerMask;
         }
 
         public void Dispose()
@@ -180,24 +237,18 @@ public class LightweightOutlineFeature : ScriptableRendererFeature
             TextureHandle depth =
                 resourceData.activeDepthTexture;
 
-            // -----------------------------------------------------
+            // =====================================================
             // BACK BUFFER CHECK
-            // -----------------------------------------------------
+            // =====================================================
 
-            // We need a readable camera color texture.
             if (resourceData.isActiveTargetBackBuffer)
             {
-                Debug.LogWarning(
-                    "Lightweight Outline skipped because the active " +
-                    "camera target is the back buffer."
-                );
-
                 return;
             }
 
-            // -----------------------------------------------------
-            // 1. CREATE MASK TEXTURE
-            // -----------------------------------------------------
+            // =====================================================
+            // MASK TEXTURE
+            // =====================================================
 
             RenderTextureDescriptor maskDescriptor =
                 cameraData.cameraTargetDescriptor;
@@ -223,9 +274,9 @@ public class LightweightOutlineFeature : ScriptableRendererFeature
                     false
                 );
 
-            // -----------------------------------------------------
-            // CREATE RENDERER LIST
-            // -----------------------------------------------------
+            // =====================================================
+            // RENDERER LIST
+            // =====================================================
 
             FilteringSettings filteringSettings =
                 new FilteringSettings(
@@ -236,7 +287,6 @@ public class LightweightOutlineFeature : ScriptableRendererFeature
             SortingCriteria sortingCriteria =
                 cameraData.defaultOpaqueSortFlags;
 
-            // Support the common URP shader pass names.
             List<ShaderTagId> shaderTags =
                 new List<ShaderTagId>
                 {
@@ -254,11 +304,11 @@ public class LightweightOutlineFeature : ScriptableRendererFeature
                     sortingCriteria
                 );
 
-            // Draw selected objects using our simple mask material.
             drawingSettings.overrideMaterial =
                 maskMaterial;
 
-            drawingSettings.overrideMaterialPassIndex = 0;
+            drawingSettings.overrideMaterialPassIndex =
+                0;
 
             RendererListParams rendererListParams =
                 new RendererListParams(
@@ -272,9 +322,9 @@ public class LightweightOutlineFeature : ScriptableRendererFeature
                     rendererListParams
                 );
 
-            // -----------------------------------------------------
-            // MASK RENDER PASS
-            // -----------------------------------------------------
+            // =====================================================
+            // MASK PASS
+            // =====================================================
 
             using (
                 var builder =
@@ -291,15 +341,12 @@ public class LightweightOutlineFeature : ScriptableRendererFeature
                     passData.rendererList
                 );
 
-                // Color target = R8 mask.
                 builder.SetRenderAttachment(
                     maskTexture,
                     0,
                     AccessFlags.Write
                 );
 
-                // Read the camera depth.
-                // This makes the mask respect scene occlusion.
                 builder.SetRenderAttachmentDepth(
                     depth,
                     AccessFlags.Read
@@ -313,14 +360,12 @@ public class LightweightOutlineFeature : ScriptableRendererFeature
                         RasterGraphContext context
                     ) =>
                     {
-                        // Clear mask to black.
                         context.cmd.ClearRenderTarget(
                             false,
                             true,
                             Color.black
                         );
 
-                        // Draw selected objects.
                         context.cmd.DrawRendererList(
                             data.rendererList
                         );
@@ -328,9 +373,9 @@ public class LightweightOutlineFeature : ScriptableRendererFeature
                 );
             }
 
-            // -----------------------------------------------------
-            // 2. CREATE OUTLINE DESTINATION
-            // -----------------------------------------------------
+            // =====================================================
+            // DESTINATION
+            // =====================================================
 
             RenderTextureDescriptor destinationDescriptor =
                 cameraData.cameraTargetDescriptor;
@@ -346,9 +391,9 @@ public class LightweightOutlineFeature : ScriptableRendererFeature
                     false
                 );
 
-            // -----------------------------------------------------
-            // SET MATERIAL PARAMETERS
-            // -----------------------------------------------------
+            // =====================================================
+            // MATERIAL PARAMETERS
+            // =====================================================
 
             outlineMaterial.SetColor(
                 OutlineColorID,
@@ -360,9 +405,24 @@ public class LightweightOutlineFeature : ScriptableRendererFeature
                 outlineWidth
             );
 
-            // -----------------------------------------------------
-            // OUTLINE FULLSCREEN PASS
-            // -----------------------------------------------------
+            outlineMaterial.SetFloat(
+                GlowRadiusID,
+                glowRadius
+            );
+
+            outlineMaterial.SetFloat(
+                GlowIntensityID,
+                glowIntensity
+            );
+
+            outlineMaterial.SetFloat(
+                SmoothCornersID,
+                smoothCorners ? 1.0f : 0.0f
+            );
+
+            // =====================================================
+            // FULLSCREEN OUTLINE
+            // =====================================================
 
             using (
                 var builder =
@@ -372,23 +432,25 @@ public class LightweightOutlineFeature : ScriptableRendererFeature
                     )
             )
             {
-                passData.source = source;
-                passData.mask = maskTexture;
-                passData.material = outlineMaterial;
+                passData.source =
+                    source;
 
-                // Read original camera color.
+                passData.mask =
+                    maskTexture;
+
+                passData.material =
+                    outlineMaterial;
+
                 builder.UseTexture(
                     passData.source,
                     AccessFlags.Read
                 );
 
-                // Read our mask.
                 builder.UseTexture(
                     passData.mask,
                     AccessFlags.Read
                 );
 
-                // Write final image.
                 builder.SetRenderAttachment(
                     destination,
                     0,
@@ -411,7 +473,12 @@ public class LightweightOutlineFeature : ScriptableRendererFeature
                         Blitter.BlitTexture(
                             context.cmd,
                             data.source,
-                            new Vector4(1f, 1f, 0f, 0f),
+                            new Vector4(
+                                1f,
+                                1f,
+                                0f,
+                                0f
+                            ),
                             data.material,
                             1
                         );
@@ -419,9 +486,9 @@ public class LightweightOutlineFeature : ScriptableRendererFeature
                 );
             }
 
-            // -----------------------------------------------------
-            // USE RESULT AS CAMERA COLOR
-            // -----------------------------------------------------
+            // =====================================================
+            // FINAL CAMERA COLOR
+            // =====================================================
 
             resourceData.cameraColor =
                 destination;

@@ -8,7 +8,8 @@ Shader "Hidden/Lightweight Outline"
         }
 
         // =========================================================
-        // PASS 0 - OUTLINE MASK
+        // PASS 0
+        // MASK
         // =========================================================
 
         Pass
@@ -56,14 +57,20 @@ Shader "Hidden/Lightweight Outline"
                 MaskVaryings input
             ) : SV_Target
             {
-                return half4(1.0, 1.0, 1.0, 1.0);
+                return half4(
+                    1.0,
+                    1.0,
+                    1.0,
+                    1.0
+                );
             }
 
             ENDHLSL
         }
 
         // =========================================================
-        // PASS 1 - OUTLINE COMPOSITE
+        // PASS 1
+        // OUTLINE
         // =========================================================
 
         Pass
@@ -83,29 +90,32 @@ Shader "Hidden/Lightweight Outline"
 
             #include "Packages/com.unity.render-pipelines.universal/ShaderLibrary/Core.hlsl"
 
-            // -----------------------------------------------------
-            // CAMERA COLOR
-            // -----------------------------------------------------
+            // =====================================================
+            // TEXTURES
+            // =====================================================
 
             TEXTURE2D_X(_BlitTexture);
-
-            // -----------------------------------------------------
-            // OUTLINE MASK
-            // -----------------------------------------------------
 
             TEXTURE2D_X(_OutlineMask);
             SAMPLER(sampler_OutlineMask);
 
-            // -----------------------------------------------------
+            // =====================================================
             // PARAMETERS
-            // -----------------------------------------------------
+            // =====================================================
 
             float4 _OutlineColor;
+
             float _OutlineWidth;
 
-            // -----------------------------------------------------
+            float _GlowRadius;
+
+            float _GlowIntensity;
+
+            float _SmoothCorners;
+
+            // =====================================================
             // FULLSCREEN TRIANGLE
-            // -----------------------------------------------------
+            // =====================================================
 
             struct Attributes
             {
@@ -137,9 +147,9 @@ Shader "Hidden/Lightweight Outline"
                 return output;
             }
 
-            // -----------------------------------------------------
+            // =====================================================
             // MASK SAMPLE
-            // -----------------------------------------------------
+            // =====================================================
 
             half SampleMask(float2 uv)
             {
@@ -150,115 +160,57 @@ Shader "Hidden/Lightweight Outline"
                 ).r;
             }
 
-            // -----------------------------------------------------
-            // FRAGMENT
-            // -----------------------------------------------------
+            // =====================================================
+            // OUTLINE SAMPLE
+            // =====================================================
 
-            half4 Frag(
-                Varyings input
-            ) : SV_Target
+            half GetOutline(
+                float2 uv,
+                float2 pixelSize
+            )
             {
-                float2 uv = input.uv;
-
-                // -------------------------------------------------
-                // ORIGINAL CAMERA COLOR
-                // -------------------------------------------------
-
-                half4 sceneColor =
-                    SAMPLE_TEXTURE2D_X(
-                        _BlitTexture,
-                        sampler_LinearClamp,
-                        uv
-                    );
-
-                // -------------------------------------------------
-                // TEXEL SIZE
-                // -------------------------------------------------
-
-                float2 texelSize =
-                    1.0 / _ScreenParams.xy;
-
-                float2 offset =
-                    texelSize * _OutlineWidth;
-
-                // -------------------------------------------------
-                // CENTER
-                // -------------------------------------------------
-
                 half center =
                     SampleMask(uv);
 
                 // -------------------------------------------------
-                // 8 DIRECTIONS
+                // BASIC 4 DIRECTIONS
                 // -------------------------------------------------
 
                 half north =
                     SampleMask(
-                        uv + float2(
+                        uv +
+                        float2(
                             0.0,
-                            offset.y
+                            pixelSize.y
                         )
                     );
 
                 half south =
                     SampleMask(
-                        uv + float2(
+                        uv +
+                        float2(
                             0.0,
-                            -offset.y
+                            -pixelSize.y
                         )
                     );
 
                 half east =
                     SampleMask(
-                        uv + float2(
-                            offset.x,
+                        uv +
+                        float2(
+                            pixelSize.x,
                             0.0
                         )
                     );
 
                 half west =
                     SampleMask(
-                        uv + float2(
-                            -offset.x,
+                        uv +
+                        float2(
+                            -pixelSize.x,
                             0.0
                         )
                     );
-
-                half northEast =
-                    SampleMask(
-                        uv + float2(
-                            offset.x,
-                            offset.y
-                        )
-                    );
-
-                half northWest =
-                    SampleMask(
-                        uv + float2(
-                            -offset.x,
-                            offset.y
-                        )
-                    );
-
-                half southEast =
-                    SampleMask(
-                        uv + float2(
-                            offset.x,
-                            -offset.y
-                        )
-                    );
-
-                half southWest =
-                    SampleMask(
-                        uv + float2(
-                            -offset.x,
-                            -offset.y
-                        )
-                    );
-
-                // -------------------------------------------------
-                // FIND SURROUNDING MASK
-                // -------------------------------------------------
 
                 half surrounding =
                     max(
@@ -272,43 +224,269 @@ Shader "Hidden/Lightweight Outline"
                         )
                     );
 
+                // -------------------------------------------------
+                // DIAGONALS
+                // -------------------------------------------------
+
+                half northEast =
+                    SampleMask(
+                        uv +
+                        float2(
+                            pixelSize.x,
+                            pixelSize.y
+                        )
+                    );
+
+                half northWest =
+                    SampleMask(
+                        uv +
+                        float2(
+                            -pixelSize.x,
+                            pixelSize.y
+                        )
+                    );
+
+                half southEast =
+                    SampleMask(
+                        uv +
+                        float2(
+                            pixelSize.x,
+                            -pixelSize.y
+                        )
+                    );
+
+                half southWest =
+                    SampleMask(
+                        uv +
+                        float2(
+                            -pixelSize.x,
+                            -pixelSize.y
+                        )
+                    );
+
+                half diagonal =
+                    max(
+                        max(
+                            northEast,
+                            northWest
+                        ),
+                        max(
+                            southEast,
+                            southWest
+                        )
+                    );
+
+                // -------------------------------------------------
+                // SMOOTH CORNER MODE
+                // -------------------------------------------------
+
+                half diagonalWeight =
+                    lerp(
+                        0.0,
+                        1.0,
+                        _SmoothCorners
+                    );
+
                 surrounding =
                     max(
                         surrounding,
-                        max(
-                            max(
-                                northEast,
-                                northWest
-                            ),
-                            max(
-                                southEast,
-                                southWest
-                            )
-                        )
+                        diagonal * diagonalWeight
                     );
+
+                // -------------------------------------------------
+                // OUTLINE ONLY OUTSIDE
+                // -------------------------------------------------
+
+                return saturate(
+                    surrounding - center
+                );
+            }
+
+            // =====================================================
+            // GLOW
+            // =====================================================
+
+            half GetGlow(
+                float2 uv,
+                float2 pixelSize
+            )
+            {
+                if (_GlowRadius <= 0.0 ||
+                    _GlowIntensity <= 0.0)
+                {
+                    return 0.0;
+                }
+
+                float2 stepSize =
+                    pixelSize * _GlowRadius;
+
+                half glow = 0.0;
+
+                // -------------------------------------------------
+                // 8 SAMPLE GLOW
+                // -------------------------------------------------
+
+                glow += SampleMask(
+                    uv +
+                    float2(
+                        stepSize.x,
+                        0.0
+                    )
+                );
+
+                glow += SampleMask(
+                    uv +
+                    float2(
+                        -stepSize.x,
+                        0.0
+                    )
+                );
+
+                glow += SampleMask(
+                    uv +
+                    float2(
+                        0.0,
+                        stepSize.y
+                    )
+                );
+
+                glow += SampleMask(
+                    uv +
+                    float2(
+                        0.0,
+                        -stepSize.y
+                    )
+                );
+
+                glow += SampleMask(
+                    uv +
+                    float2(
+                        stepSize.x,
+                        stepSize.y
+                    )
+                );
+
+                glow += SampleMask(
+                    uv +
+                    float2(
+                        -stepSize.x,
+                        stepSize.y
+                    )
+                );
+
+                glow += SampleMask(
+                    uv +
+                    float2(
+                        stepSize.x,
+                        -stepSize.y
+                    )
+                );
+
+                glow += SampleMask(
+                    uv +
+                    float2(
+                        -stepSize.x,
+                        -stepSize.y
+                    )
+                );
+
+                glow *= 0.125;
+
+                return glow *
+                    _GlowIntensity;
+            }
+
+            // =====================================================
+            // FRAGMENT
+            // =====================================================
+
+            half4 Frag(
+                Varyings input
+            ) : SV_Target
+            {
+                float2 uv =
+                    input.uv;
+
+                // -------------------------------------------------
+                // SCENE
+                // -------------------------------------------------
+
+                half4 sceneColor =
+                    SAMPLE_TEXTURE2D_X(
+                        _BlitTexture,
+                        sampler_LinearClamp,
+                        uv
+                    );
+
+                // -------------------------------------------------
+                // PIXEL SIZE
+                // -------------------------------------------------
+
+                float2 pixelSize =
+                    1.0 /
+                    _ScreenParams.xy;
 
                 // -------------------------------------------------
                 // OUTLINE
                 // -------------------------------------------------
 
+                float2 outlinePixelSize =
+                    pixelSize *
+                    _OutlineWidth;
+
                 half outline =
-                    saturate(
-                        surrounding - center
+                    GetOutline(
+                        uv,
+                        outlinePixelSize
                     );
+
+                // -------------------------------------------------
+                // GLOW
+                // -------------------------------------------------
+
+                half glow =
+                    GetGlow(
+                        uv,
+                        pixelSize
+                    );
+
+                // Glow should not overpower the actual outline.
+                glow *=
+                    (1.0 - outline);
+
+                // -------------------------------------------------
+                // HDR OUTLINE
+                // -------------------------------------------------
+
+                half3 outlineColor =
+                    _OutlineColor.rgb;
 
                 // -------------------------------------------------
                 // COMPOSITE
                 // -------------------------------------------------
 
-                half3 finalColor =
+                half3 result =
+                    sceneColor.rgb;
+
+                // Main outline.
+                result =
                     lerp(
-                        sceneColor.rgb,
-                        _OutlineColor.rgb,
-                        outline * _OutlineColor.a
+                        result,
+                        outlineColor,
+                        outline *
+                        _OutlineColor.a
                     );
 
+                // HDR glow.
+                //
+                // Additive instead of lerp.
+                // This allows values > 1.0 to reach Bloom.
+                result +=
+                    outlineColor *
+                    glow;
+
                 return half4(
-                    finalColor,
+                    result,
                     sceneColor.a
                 );
             }
