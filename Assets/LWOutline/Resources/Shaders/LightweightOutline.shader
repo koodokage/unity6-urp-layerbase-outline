@@ -17,7 +17,7 @@ Shader "Hidden/Lightweight Outline"
             Name "Outline Mask"
 
             ZWrite Off
-            ZTest LEqual
+            ZTest Always
             Cull Back
 
             Blend One Zero
@@ -34,86 +34,70 @@ Shader "Hidden/Lightweight Outline"
             struct MaskAttributes
             {
                 float4 positionOS : POSITION;
-
                 UNITY_VERTEX_INPUT_INSTANCE_ID
             };
 
             struct MaskVaryings
             {
                 float4 positionCS : SV_POSITION;
-
+                float3 positionWS : TEXCOORD0;
                 UNITY_VERTEX_INPUT_INSTANCE_ID
             };
 
-            MaskVaryings MaskVertex(
-                MaskAttributes input)
+            // x = bu layer'a ait maksimum outline mesafesi (world units).
+            // 0 = sinirsiz.
+            float4 _LayerRenderDistance[32];
+
+            MaskVaryings MaskVertex(MaskAttributes input)
             {
                 MaskVaryings output;
 
                 UNITY_SETUP_INSTANCE_ID(input);
                 UNITY_TRANSFER_INSTANCE_ID(input, output);
 
-                output.positionCS =
-                    TransformObjectToHClip(
-                        input.positionOS.xyz
-                    );
+                output.positionWS = TransformObjectToWorld(input.positionOS.xyz);
+                output.positionCS = TransformWorldToHClip(output.positionWS);
 
                 return output;
             }
 
             uint GetOutlineLayerID()
             {
-                uint renderingLayers =
-                    GetMeshRenderingLayer();
+                uint renderingLayers = GetMeshRenderingLayer();
 
-                /*
-                 * Rendering layer 0 -> ID 1
-                 * Rendering layer 1 -> ID 2
-                 * Rendering layer 2 -> ID 3
-                 * ...
-                 *
-                 * 0 means no outline.
-                 *
-                 * We select the first matching bit.
-                 */
-
+                // Rendering layer 0 -> ID 1, layer 1 -> ID 2, ... 0 = outline yok.
                 [unroll]
                 for (uint i = 0u; i < 32u; i++)
                 {
-                    uint bit =
-                        1u << i;
+                    uint bit = 1u << i;
 
                     if ((renderingLayers & bit) != 0u)
-                    {
                         return i + 1u;
-                    }
                 }
 
                 return 0u;
             }
 
-            half4 MaskFragment(
-                MaskVaryings input
-            ) : SV_Target
+            half4 MaskFragment(MaskVaryings input) : SV_Target
             {
-                uint layerID =
-                    GetOutlineLayerID();
+                uint layerID = GetOutlineLayerID();
 
-                /*
-                 * R8 texture.
-                 *
-                 * 0 = no outline
-                 * 1 = rendering layer 0
-                 * 2 = rendering layer 1
-                 * ...
-                 */
+                if (layerID != 0u)
+                {
+                    uint index = min(layerID - 1u, 31u);
+                    float maxDistance = _LayerRenderDistance[index].x;
 
-                return half4(
-                    layerID / 255.0,
-                    0.0,
-                    0.0,
-                    1.0
-                );
+                    if (maxDistance > 0.0)
+                    {
+                        float camDistance = distance(input.positionWS, GetCameraPositionWS());
+
+                        if (camDistance > maxDistance)
+                            layerID = 0u;
+                    }
+                }
+
+                // R8: 0 = outline yok, 1..32 = rendering layer 0..31
+                return half4(layerID / 255.0, 0.0, 0.0, 1.0);
             }
 
             ENDHLSL
@@ -121,71 +105,68 @@ Shader "Hidden/Lightweight Outline"
 
 
         // =========================================================
+        // FULLSCREEN BLIT PASSES (JFA Init / JFA Step / Composite)
+        // =========================================================
+
+        HLSLINCLUDE
+
+        #include "Packages/com.unity.render-pipelines.universal/ShaderLibrary/Core.hlsl"
+
+        TEXTURE2D_X(_BlitTexture);
+        float4 _BlitTexture_TexelSize;
+
+        struct BlitAttributes
+        {
+            uint vertexID : SV_VertexID;
+        };
+
+        struct BlitVaryings
+        {
+            float4 positionCS : SV_POSITION;
+            float2 uv : TEXCOORD0;
+        };
+
+        BlitVaryings BlitVert(BlitAttributes input)
+        {
+            BlitVaryings output;
+
+            output.positionCS = GetFullScreenTriangleVertexPosition(input.vertexID);
+            output.uv = GetFullScreenTriangleTexCoord(input.vertexID);
+
+            return output;
+        }
+
+        ENDHLSL
+
+        // =========================================================
         // PASS 1
-        // SELECTED DEPTH
+        // JFA INIT
+        // Mask texture'daki her piksel icin: doluysa kendi UV'sini,
+        // bosSa (-1,-1) "seed yok" degerini yazar.
         // =========================================================
 
         Pass
         {
-            Name "Selected Depth"
+            Name "JFA Init"
 
             ZWrite Off
             ZTest Always
-            Cull Back
-
+            Cull Off
             Blend One Zero
 
             HLSLPROGRAM
 
-            #pragma vertex SelectedDepthVertex
-            #pragma fragment SelectedDepthFragment
+            #pragma vertex BlitVert
+            #pragma fragment JFAInitFragment
 
-            #pragma multi_compile_instancing
-
-            #include "Packages/com.unity.render-pipelines.universal/ShaderLibrary/Core.hlsl"
-
-            struct DepthAttributes
+            float4 JFAInitFragment(BlitVaryings input) : SV_Target
             {
-                float4 positionOS : POSITION;
+                half m = SAMPLE_TEXTURE2D_X(_BlitTexture, sampler_PointClamp, input.uv).r;
 
-                UNITY_VERTEX_INPUT_INSTANCE_ID
-            };
+                if (m > 0.001h)
+                    return float4(input.uv, 0.0, 0.0);
 
-            struct DepthVaryings
-            {
-                float4 positionCS : SV_POSITION;
-
-                UNITY_VERTEX_INPUT_INSTANCE_ID
-            };
-
-            DepthVaryings SelectedDepthVertex(
-                DepthAttributes input)
-            {
-                DepthVaryings output;
-
-                UNITY_SETUP_INSTANCE_ID(input);
-                UNITY_TRANSFER_INSTANCE_ID(input, output);
-
-                output.positionCS =
-                    TransformObjectToHClip(
-                        input.positionOS.xyz
-                    );
-
-                return output;
-            }
-
-            float SelectedDepthFragment(
-                DepthVaryings input
-            ) : SV_Target
-            {
-                float rawDepth =
-                    input.positionCS.z /
-                    input.positionCS.w;
-
-                return LinearEyeDepth(
-                    rawDepth,
-                    _ZBufferParams
-                );
+                return float4(-1.0, -1.0, 0.0, 0.0);
             }
 
             ENDHLSL
@@ -194,7 +175,71 @@ Shader "Hidden/Lightweight Outline"
 
         // =========================================================
         // PASS 2
-        // COMPOSITE
+        // JFA STEP
+        // 3x3 komsuluk (step ile olceklenmis) icinde en yakin seed'i
+        // bulur. log2(maxWidth) civarinda pass ile calisir, boylece
+        // outline genisligi ne olursa olsun maliyet sabit kalir.
+        // =========================================================
+
+        Pass
+        {
+            Name "JFA Step"
+
+            ZWrite Off
+            ZTest Always
+            Cull Off
+            Blend One Zero
+
+            HLSLPROGRAM
+
+            #pragma vertex BlitVert
+            #pragma fragment JFAStepFragment
+
+            float _JFAStep;
+
+            float4 JFAStepFragment(BlitVaryings input) : SV_Target
+            {
+                float2 uv = input.uv;
+
+                float2 bestSeed = float2(-1.0, -1.0);
+                float bestDistSq = 1e20;
+
+                [unroll]
+                for (int y = -1; y <= 1; y++)
+                {
+                    [unroll]
+                    for (int x = -1; x <= 1; x++)
+                    {
+                        float2 offsetUV = uv +
+                            float2(x, y) * _JFAStep * _BlitTexture_TexelSize.xy;
+
+                        float2 seed = SAMPLE_TEXTURE2D_X(
+                            _BlitTexture, sampler_PointClamp, offsetUV).xy;
+
+                        if (seed.x < 0.0)
+                            continue;
+
+                        float2 diff = (uv - seed) / _BlitTexture_TexelSize.xy;
+                        float distSq = dot(diff, diff);
+
+                        if (distSq < bestDistSq)
+                        {
+                            bestDistSq = distSq;
+                            bestSeed = seed;
+                        }
+                    }
+                }
+
+                return float4(bestSeed, 0.0, 0.0);
+            }
+
+            ENDHLSL
+        }
+
+
+        // =========================================================
+        // PASS 3
+        // OUTLINE COMPOSITE
         // =========================================================
 
         Pass
@@ -204,466 +249,88 @@ Shader "Hidden/Lightweight Outline"
             ZWrite Off
             ZTest Always
             Cull Off
-
             Blend One Zero
 
             HLSLPROGRAM
 
-            #pragma vertex Vert
+            #pragma vertex BlitVert
             #pragma fragment Frag
 
-            #include "Packages/com.unity.render-pipelines.universal/ShaderLibrary/Core.hlsl"
-
-            // =====================================================
-            // BLIT SOURCE
-            // =====================================================
-
-            TEXTURE2D_X(_BlitTexture);
-
-            // =====================================================
-            // OUTLINE MASK
-            // =====================================================
-
             TEXTURE2D_X(_OutlineMask);
-
-            // =====================================================
-            // SELECTED DEPTH
-            // =====================================================
-
-            TEXTURE2D_X(_SelectedDepth);
-
-            // =====================================================
-            // CAMERA DEPTH
-            // =====================================================
-
-            TEXTURE2D_X(_CameraDepthTexture);
-
-            // =====================================================
-            // PARAMETERS
-            // =====================================================
-
-            float _MaxOutlineWidth;
-
-            // =====================================================
-            // LAYER DATA
-            // =====================================================
+            TEXTURE2D_X(_JFASeedTex);
 
             /*
-             * 32 renk (HDR).
+             * x = bu layer'a ait outline mesafesi (full-res piksel)
              *
-             * Index 0 = Rendering Layer 0
-             * Index 1 = Rendering Layer 1
-             * ...
+             * Vector4 array kullanmamizin sebebi: HLSL constant buffer'da
+             * scalar float array elemanlari 16 byte'a hizalanir ama
+             * Unity'nin SetFloatArray'i veriyi sikisik gonderir; bu da
+             * ilk eleman disindaki degerlerin bozuk okunmasina yol acar.
              */
-
+            float4 _LayerWidths[32];
             float4 _LayerColors[32];
 
-            /*
-             * x = occlusion mode (0 = VisibleOnly, 1 = AlwaysVisible)
-             * y = bu layer'a ait outline kalinligi (piksel)
-             */
-
-            float4 _LayerOcclusion[32];
-
-            // =====================================================
-            // FULLSCREEN
-            // =====================================================
-
-            struct Attributes
+            uint SampleLayerID(float2 uv)
             {
-                uint vertexID : SV_VertexID;
-            };
-
-            struct Varyings
-            {
-                float4 positionCS : SV_POSITION;
-
-                float2 uv : TEXCOORD0;
-            };
-
-            Varyings Vert(
-                Attributes input)
-            {
-                Varyings output;
-
-                output.positionCS =
-                    GetFullScreenTriangleVertexPosition(
-                        input.vertexID
-                    );
-
-                output.uv =
-                    GetFullScreenTriangleTexCoord(
-                        input.vertexID
-                    );
-
-                return output;
+                half encoded = SAMPLE_TEXTURE2D_X(_OutlineMask, sampler_PointClamp, uv).r;
+                return (uint) round(encoded * 255.0);
             }
 
-            // =====================================================
-            // MASK
-            // =====================================================
-
-            half SampleMask(
-                float2 uv)
+            float4 GetLayerColor(uint layerID)
             {
-                return SAMPLE_TEXTURE2D_X(
-                    _OutlineMask,
-                    sampler_PointClamp,
-                    uv
-                ).r;
-            }
-
-            uint SampleLayerID(
-                float2 uv)
-            {
-                half encoded =
-                    SampleMask(uv);
-
-                /*
-                 * R8 normalized:
-                 *
-                 * 1 / 255
-                 * 2 / 255
-                 * ...
-                 */
-
-                return (uint)
-                    round(
-                        encoded * 255.0
-                    );
-            }
-
-            // =====================================================
-            // DEPTH
-            // =====================================================
-
-            float SampleSelectedDepth(
-                float2 uv)
-            {
-                return SAMPLE_TEXTURE2D_X(
-                    _SelectedDepth,
-                    sampler_PointClamp,
-                    uv
-                ).r;
-            }
-
-            float SampleCameraDepth(
-                float2 uv)
-            {
-                float rawDepth =
-                    SAMPLE_TEXTURE2D_X(
-                        _CameraDepthTexture,
-                        sampler_PointClamp,
-                        uv
-                    ).r;
-
-                return LinearEyeDepth(
-                    rawDepth,
-                    _ZBufferParams
-                );
-            }
-
-            // =====================================================
-            // LAYER
-            // =====================================================
-
-            float4 GetLayerColor(
-                uint layerID)
-            {
-                if (layerID == 0u)
-                    return 0.0;
-
-                uint index =
-                    layerID - 1u;
-
-                index =
-                    min(index, 31u);
-
+                if (layerID == 0u) return 0.0;
+                uint index = min(layerID - 1u, 31u);
                 return _LayerColors[index];
             }
 
-            float GetLayerOcclusion(
-                uint layerID)
+            float GetLayerWidth(uint layerID)
             {
-                if (layerID == 0u)
-                    return 0.0;
-
-                uint index =
-                    layerID - 1u;
-
-                index =
-                    min(index, 31u);
-
-                return _LayerOcclusion[index].x;
+                if (layerID == 0u) return 0.0;
+                uint index = min(layerID - 1u, 31u);
+                return _LayerWidths[index].x;
             }
 
-            float GetLayerWidth(
-                uint layerID)
+            half4 Frag(BlitVaryings input) : SV_Target
             {
-                if (layerID == 0u)
-                    return 0.0;
+                float2 uv = input.uv;
 
-                uint index =
-                    layerID - 1u;
+                half4 sceneColor = SAMPLE_TEXTURE2D_X(
+                    _BlitTexture, sampler_LinearClamp, uv);
 
-                index =
-                    min(index, 31u);
-
-                return _LayerOcclusion[index].y;
-            }
-
-            // =====================================================
-            // OCCLUSION
-            // =====================================================
-
-            float GetOcclusionVisibility(
-                float2 uv,
-                uint layerID)
-            {
-                if (layerID == 0u)
-                    return 0.0;
-
-                float alwaysVisible =
-                    GetLayerOcclusion(
-                        layerID
-                    );
-
-                /*
-                 * AlwaysVisible:
-                 *
-                 * Derinlik testi yapilmaz, her zaman gorunur.
-                 */
-
-                if (alwaysVisible > 0.5)
-                    return 1.0;
-
-                float selectedDepth =
-                    SampleSelectedDepth(uv);
-
-                if (selectedDepth <= 0.0001)
-                    return 0.0;
-
-                float cameraDepth =
-                    SampleCameraDepth(uv);
-
-                /*
-                 * Obje sahnede gorunur durumda.
-                 */
-
-                if (selectedDepth <=
-                    cameraDepth + 0.001)
-                {
-                    return 1.0;
-                }
-
-                /*
-                 * Obje baska bir yuzeyin arkasinda kaliyor.
-                 */
-
-                return 0.0;
-            }
-
-            // =====================================================
-            // NEAREST OBJECT SEARCH
-            //
-            // Arka plan pikselinden 4 yonde disari dogru yuruyerek
-            // en yakin objeyi ve mesafeyi bulur. Her objenin kendi
-            // width degeri ile karsilastirilir.
-            // =====================================================
-
-            void FindNearestOutline(
-                float2 uv,
-                float2 pixelSize,
-                int maxSteps,
-                out uint outLayerID,
-                out float2 outUV)
-            {
-                outLayerID = 0u;
-                outUV = uv;
-
-                float bestDistance =
-                    1e6;
-
-                /*
-                 * 8 yon (kardinal + capraz): sadece 4 kardinal
-                 * yon kullanilirsa outline siluetli/kose kose
-                 * (diamond shape) gorunur. Capraz yonler eklenince
-                 * cok daha yuvarlak ve pürüzsüz bir kenar elde
-                 * edilir.
-                 */
-
-                float2 directions[8] =
-                {
-                    float2(0.0, 1.0),
-                    float2(0.0, -1.0),
-                    float2(1.0, 0.0),
-                    float2(-1.0, 0.0),
-                    float2(0.70710678, 0.70710678),
-                    float2(-0.70710678, 0.70710678),
-                    float2(0.70710678, -0.70710678),
-                    float2(-0.70710678, -0.70710678)
-                };
-
-                [loop]
-                for (int d = 0; d < 8; d++)
-                {
-                    [loop]
-                    for (int s = 1; s <= maxSteps; s++)
-                    {
-                        float2 sampleUV =
-                            uv +
-                            directions[d] *
-                            pixelSize *
-                            (float) s;
-
-                        uint lid =
-                            SampleLayerID(sampleUV);
-
-                        if (lid != 0u)
-                        {
-                            float layerWidth =
-                                GetLayerWidth(lid);
-
-                            if ((float) s <= layerWidth &&
-                                (float) s < bestDistance)
-                            {
-                                bestDistance = (float) s;
-                                outLayerID = lid;
-                                outUV = sampleUV;
-                            }
-
-                            break;
-                        }
-                    }
-                }
-            }
-
-            // =====================================================
-            // FRAGMENT
-            // =====================================================
-
-            half4 Frag(
-                Varyings input
-            ) : SV_Target
-            {
-                float2 uv =
-                    input.uv;
-
-                half4 sceneColor =
-                    SAMPLE_TEXTURE2D_X(
-                        _BlitTexture,
-                        sampler_LinearClamp,
-                        uv
-                    );
-
-                // -------------------------------------------------
-                // Outline objenin ustune degil, sadece etrafina
-                // cizilir.
-                // -------------------------------------------------
-
-                uint centerLayerID =
-                    SampleLayerID(uv);
-
+                // Bu piksel zaten outline'li objenin ustundeyse, ustune
+                // outline cizme (outline sadece cevresine cizilir).
+                uint centerLayerID = SampleLayerID(uv);
                 if (centerLayerID != 0u)
                     return sceneColor;
 
-                float2 pixelSize =
-                    1.0 /
-                    _ScreenParams.xy;
+                float2 seed = SAMPLE_TEXTURE2D_X(_JFASeedTex, sampler_PointClamp, uv).xy;
+                if (seed.x < 0.0)
+                    return sceneColor;
 
-                int maxSteps =
-                    max(
-                        1,
-                        (int) ceil(_MaxOutlineWidth)
-                    );
+                uint layerID = SampleLayerID(seed);
+                if (layerID == 0u)
+                    return sceneColor;
 
-                // -------------------------------------------------
-                // SMOOTH / AA
-                //
-                // Tek merkez ornegi yerine piksel icinde 4 alt
-                // nokta (rotated grid) ornekleniyor. Kenar
-                // bolgesinde bazi alt noktalar isabet ediyor,
-                // bazilari etmiyor; bu da yumusak (anti-alias)
-                // bir gecis (kismi kapsama / coverage) sagliyor.
-                // -------------------------------------------------
+                float width = GetLayerWidth(layerID);
 
-                float2 subOffsets[4] =
-                {
-                    float2(0.25, 0.25),
-                    float2(-0.25, 0.25),
-                    float2(0.25, -0.25),
-                    float2(-0.25, -0.25)
-                };
+                // Mesafe full-res ekran pikseli cinsinden hesaplanir;
+                // JFA'nin calistigi (dusuk) cozunurlukten bagimsizdir.
+                float distPixels = length((uv - seed) * _ScreenParams.xy);
 
-                float coverage =
-                    0.0;
+                if (distPixels > width + 1.0)
+                    return sceneColor;
 
-                half3 colorAccum =
-                    0.0;
-
-                [loop]
-                for (int ss = 0; ss < 4; ss++)
-                {
-                    float2 subUV =
-                        uv +
-                        subOffsets[ss] *
-                        pixelSize;
-
-                    uint hitLayerID;
-                    float2 hitUV;
-
-                    FindNearestOutline(
-                        subUV,
-                        pixelSize,
-                        maxSteps,
-                        hitLayerID,
-                        hitUV
-                    );
-
-                    if (hitLayerID == 0u)
-                        continue;
-
-                    float visibility =
-                        GetOcclusionVisibility(
-                            hitUV,
-                            hitLayerID
-                        );
-
-                    if (visibility <= 0.0)
-                        continue;
-
-                    float4 layerColor =
-                        GetLayerColor(
-                            hitLayerID
-                        );
-
-                    coverage +=
-                        0.25;
-
-                    colorAccum +=
-                        layerColor.rgb *
-                        layerColor.a *
-                        0.25;
-                }
-
+                // AlwaysVisible: derinlik/occlusion testi yok, outline
+                // duvar/obje arkasindan da her zaman gorunur.
+                float coverage = 1.0 - smoothstep(max(width - 1.0, 0.0), width, distPixels);
                 if (coverage <= 0.0)
                     return sceneColor;
 
-                half3 outlineColor =
-                    colorAccum /
-                    max(coverage, 0.0001);
+                float4 layerColor = GetLayerColor(layerID);
 
-                half3 result =
-                    lerp(
-                        sceneColor.rgb,
-                        outlineColor,
-                        coverage
-                    );
+                half3 result = lerp(sceneColor.rgb, layerColor.rgb * layerColor.a, coverage);
 
-                return half4(
-                    result,
-                    sceneColor.a
-                );
+                return half4(result, sceneColor.a);
             }
 
             ENDHLSL

@@ -8,22 +8,14 @@ using UnityEngine.Rendering.Universal;
 public class LightweightOutlineFeature : ScriptableRendererFeature
 {
     // =============================================================
-    // OCCLUSION
-    // =============================================================
-
-    public enum OutlineOcclusionMode
-    {
-        VisibleOnly,
-        AlwaysVisible
-    }
-
-    // =============================================================
     // LAYER PROFILE
     // =============================================================
 
     [Serializable]
     public class OutlineLayerProfile
     {
+        public string layerName;
+
         [Tooltip("MeshRenderer > Rendering Layer Mask index: 0-31")]
         [Range(0, 31)]
         public int renderingLayer = 0;
@@ -31,12 +23,16 @@ public class LightweightOutlineFeature : ScriptableRendererFeature
         [ColorUsage(true, true)]
         public Color color = Color.white;
 
-        public OutlineOcclusionMode occlusionMode =
-            OutlineOcclusionMode.VisibleOnly;
-
-        [Tooltip("Bu layer'a ait outline kalinligi (piksel).")]
+        [Tooltip("Bu layer'a ait outline mesafesi, EKRAN (full-res) piksel cinsinden.")]
         [Min(0.5f)]
         public float width = 2.0f;
+
+        [Tooltip(
+            "Bu layer'a ait outline'in gorunecegi maksimum kamera mesafesi " +
+            "(world units, metre). 0 = sinirsiz mesafe."
+        )]
+        [Min(0f)]
+        public float renderDistance = 0f;
     }
 
     // =============================================================
@@ -53,6 +49,24 @@ public class LightweightOutlineFeature : ScriptableRendererFeature
             "ekleyin. Rendering Layer Mask buradan otomatik hesaplanir."
         )]
         public List<OutlineLayerProfile> layerProfiles = new();
+
+        [Header("Performance")]
+
+        [Tooltip(
+            "Mask / depth / Jump-Flood hesaplamalarinin yapildigi cozunurluk " +
+            "(kamera hedefine oranla). Dusuk deger = cok daha hizli, " +
+            "kenarlar biraz daha yumusak/kaba olur. Composite her zaman " +
+            "tam cozunurlukte yapilir."
+        )]
+        [Range(0.25f, 1f)]
+        public float resolutionScale = 0.5f;
+
+        [Tooltip(
+            "JFA sonunda kalite icin eklenen ekstra step=1 duzeltme pass sayisi. " +
+            "0-2 arasi genelde yeterli."
+        )]
+        [Range(0, 2)]
+        public int extraRefinementPasses = 1;
 
         [Header("Render Pass")]
 
@@ -139,6 +153,7 @@ public class LightweightOutlineFeature : ScriptableRendererFeature
         // =====================================================
 
         uint renderingLayerMask = 0u;
+        float maxWidth = 0f;
 
         for (int i = 0; i < settings.layerProfiles.Count; i++)
         {
@@ -151,6 +166,9 @@ public class LightweightOutlineFeature : ScriptableRendererFeature
 
             renderingLayerMask |=
                 (1u << layer);
+
+            maxWidth =
+                Mathf.Max(maxWidth, settings.layerProfiles[i].width);
         }
 
         if (renderingLayerMask == 0u)
@@ -161,7 +179,10 @@ public class LightweightOutlineFeature : ScriptableRendererFeature
 
         outlinePass.Setup(
             renderingLayerMask,
-            settings.layerProfiles
+            settings.layerProfiles,
+            Mathf.Clamp(settings.resolutionScale, 0.25f, 1f),
+            Mathf.Max(1f, maxWidth),
+            Mathf.Clamp(settings.extraRefinementPasses, 0, 2)
         );
 
         renderer.EnqueuePass(outlinePass);
@@ -196,8 +217,33 @@ public class LightweightOutlineFeature : ScriptableRendererFeature
         private readonly Material maskMaterial;
 
         private uint renderingLayerMask;
-
         private List<OutlineLayerProfile> layerProfiles;
+
+        private float resolutionScale = 0.5f;
+        private float maxWidth = 8f;
+        private int extraRefinementPasses = 1;
+
+        // Her kare yeniden allocate etmemek icin cache'lenmis buffer'lar
+        private readonly Color[] cachedColors = new Color[32];
+        private readonly Vector4[] cachedWidths = new Vector4[32];
+        private readonly Vector4[] cachedRenderDistance = new Vector4[32];
+        private readonly List<int> cachedSteps = new List<int>(16);
+
+        private static readonly List<ShaderTagId> ShaderTags = new List<ShaderTagId>
+        {
+            new ShaderTagId("UniversalForward"),
+            new ShaderTagId("UniversalForwardOnly"),
+            new ShaderTagId("SRPDefaultUnlit")
+        };
+
+        // =========================================================
+        // SHADER PASS INDICES
+        // =========================================================
+
+        private const int PassMask = 0;
+        private const int PassJfaInit = 1;
+        private const int PassJfaStep = 2;
+        private const int PassComposite = 3;
 
         // =========================================================
         // SHADER IDS
@@ -206,20 +252,20 @@ public class LightweightOutlineFeature : ScriptableRendererFeature
         private static readonly int OutlineMaskID =
             Shader.PropertyToID("_OutlineMask");
 
-        private static readonly int SelectedDepthID =
-            Shader.PropertyToID("_SelectedDepth");
+        private static readonly int JfaSeedID =
+            Shader.PropertyToID("_JFASeedTex");
 
-        private static readonly int CameraDepthID =
-            Shader.PropertyToID("_CameraDepthTexture");
+        private static readonly int JfaStepID =
+            Shader.PropertyToID("_JFAStep");
 
         private static readonly int LayerColorID =
             Shader.PropertyToID("_LayerColors");
 
-        private static readonly int LayerOcclusionID =
-            Shader.PropertyToID("_LayerOcclusion");
+        private static readonly int LayerWidthID =
+            Shader.PropertyToID("_LayerWidths");
 
-        private static readonly int MaxOutlineWidthID =
-            Shader.PropertyToID("_MaxOutlineWidth");
+        private static readonly int LayerRenderDistanceID =
+            Shader.PropertyToID("_LayerRenderDistance");
 
         // =========================================================
         // PASS DATA
@@ -230,12 +276,15 @@ public class LightweightOutlineFeature : ScriptableRendererFeature
             public RendererListHandle rendererList;
         }
 
-        private class SelectedDepthPassData
+        private class JfaBlitPassData
         {
-            public RendererListHandle rendererList;
+            public TextureHandle source;
+            public Material material;
+            public int passIndex;
+            public float step;
         }
 
-        private class OutlinePassData
+        private class CompositePassData
         {
             public TextureHandle source;
             public Material material;
@@ -249,11 +298,8 @@ public class LightweightOutlineFeature : ScriptableRendererFeature
             Material outlineMaterial,
             Material maskMaterial)
         {
-            this.outlineMaterial =
-                outlineMaterial;
-
-            this.maskMaterial =
-                maskMaterial;
+            this.outlineMaterial = outlineMaterial;
+            this.maskMaterial = maskMaterial;
         }
 
         // =========================================================
@@ -262,119 +308,100 @@ public class LightweightOutlineFeature : ScriptableRendererFeature
 
         public void Setup(
             uint renderingLayerMask,
-            List<OutlineLayerProfile> layerProfiles)
+            List<OutlineLayerProfile> layerProfiles,
+            float resolutionScale,
+            float maxWidth,
+            int extraRefinementPasses)
         {
-            this.renderingLayerMask =
-                renderingLayerMask;
-
-            this.layerProfiles =
-                layerProfiles;
+            this.renderingLayerMask = renderingLayerMask;
+            this.layerProfiles = layerProfiles;
+            this.resolutionScale = resolutionScale;
+            this.maxWidth = maxWidth;
+            this.extraRefinementPasses = extraRefinementPasses;
         }
 
-        // =========================================================
-        // DISPOSE
-        // =========================================================
-
-        public void Dispose()
-        {
-        }
+        public void Dispose() { }
 
         // =========================================================
-        // PROFILE
+        // PROFILE -> MATERIAL ARRAYS
         // =========================================================
 
         private void ApplyLayerProfiles()
         {
-            Color[] colors =
-                new Color[32];
-
-            Vector4[] occlusion =
-                new Vector4[32];
-
-            /*
-             * occlusion[i].x = occlusion mode (0/1)
-             * occlusion[i].y = outline width (piksel)
-             *
-             * Width icin ayri bir float[] array KULLANILMIYOR:
-             * HLSL constant buffer'da scalar float array
-             * elemanlari 16 byte'a hizalanir, ama Unity'nin
-             * SetFloatArray'i veriyi sikisik gonderir. Bu, ilk
-             * eleman disindaki tum degerlerin bozuk okunmasina
-             * yol aciyordu. float4 array (_LayerOcclusion) zaten
-             * doğru calistigi icin width'i onun bos kanaliyla
-             * (y) tasiyoruz.
-             */
-
             for (int i = 0; i < 32; i++)
             {
-                colors[i] =
-                    Color.white;
-
-                occlusion[i] =
-                    new Vector4(0f, 2f, 0f, 0f);
+                cachedColors[i] = Color.white;
+                cachedWidths[i] = new Vector4(2f, 0f, 0f, 0f);
+                cachedRenderDistance[i] = new Vector4(0f, 0f, 0f, 0f); // 0 = sinirsiz
             }
-
-            float maxWidth =
-                2.0f;
 
             if (layerProfiles != null)
             {
-                for (int i = 0;
-                     i < layerProfiles.Count;
-                     i++)
+                for (int i = 0; i < layerProfiles.Count; i++)
                 {
-                    OutlineLayerProfile profile =
-                        layerProfiles[i];
+                    OutlineLayerProfile profile = layerProfiles[i];
 
-                    int layer =
-                        Mathf.Clamp(
-                            profile.renderingLayer,
-                            0,
-                            31
-                        );
+                    int layer = Mathf.Clamp(profile.renderingLayer, 0, 31);
 
-                    colors[layer] =
-                        profile.color;
+                    cachedColors[layer] = profile.color;
 
-                    float width =
-                        Mathf.Max(
-                            0.5f,
-                            profile.width
-                        );
+                    float width = Mathf.Max(0.5f, profile.width);
 
-                    occlusion[layer] =
-                        new Vector4(
-                            profile.occlusionMode ==
-                            OutlineOcclusionMode.AlwaysVisible
-                                ? 1.0f
-                                : 0.0f,
-                            width,
-                            0f,
-                            0f
-                        );
+                    // Not: width'i tek basina float[] olarak gondermiyoruz,
+                    // cunku HLSL constant buffer'da scalar float array
+                    // elemanlari 16 byte'a hizalanir ama Unity'nin
+                    // SetFloatArray'i veriyi sikisik gonderir; bu da ilk
+                    // eleman disindaki degerlerin bozuk okunmasina yol
+                    // aciyor. Vector4 array (x = width) bu sorunu yasamaz.
+                    cachedWidths[layer] = new Vector4(width, 0f, 0f, 0f);
 
-                    maxWidth =
-                        Mathf.Max(
-                            maxWidth,
-                            width
-                        );
+                    cachedRenderDistance[layer] =
+                        new Vector4(Mathf.Max(0f, profile.renderDistance), 0f, 0f, 0f);
                 }
             }
 
-            outlineMaterial.SetColorArray(
-                LayerColorID,
-                colors
-            );
+            outlineMaterial.SetColorArray(LayerColorID, cachedColors);
+            outlineMaterial.SetVectorArray(LayerWidthID, cachedWidths);
 
-            outlineMaterial.SetVectorArray(
-                LayerOcclusionID,
-                occlusion
-            );
+            // Mesafe kesme islemi Mask pass'te (maskMaterial) yapiliyor,
+            // boylece uzaktaki objeler icin JFA/Composite'e hic seed
+            // gitmiyor.
+            maskMaterial.SetVectorArray(LayerRenderDistanceID, cachedRenderDistance);
+        }
 
-            outlineMaterial.SetFloat(
-                MaxOutlineWidthID,
-                maxWidth
-            );
+        // =========================================================
+        // JFA STEP SIZES (N, N/2, ..., 1) + extra refinement (step=1)
+        // =========================================================
+
+        private static int NextPow2(int v)
+        {
+            v = Mathf.Max(1, v);
+            int p = 1;
+            while (p < v) p <<= 1;
+            return p;
+        }
+
+        private List<int> BuildStepSizes(int scaledWidth, int scaledHeight)
+        {
+            cachedSteps.Clear();
+
+            // Genislik full-res piksel cinsinden; JFA texture'i scaled
+            // cozunurlukte oldugu icin ihtiyac duyulan yayilma yaricapini
+            // (texel cinsinden) scaled uzaya cevirmemiz gerekiyor.
+            int radiusTexels =
+                Mathf.CeilToInt(maxWidth * resolutionScale);
+
+            radiusTexels = Mathf.Clamp(radiusTexels, 1, Mathf.Max(scaledWidth, scaledHeight));
+
+            int n = NextPow2(radiusTexels);
+
+            for (int s = n; s >= 1; s >>= 1)
+                cachedSteps.Add(s);
+
+            for (int i = 0; i < extraRefinementPasses; i++)
+                cachedSteps.Add(1);
+
+            return cachedSteps;
         }
 
         // =========================================================
@@ -397,339 +424,193 @@ public class LightweightOutlineFeature : ScriptableRendererFeature
             UniversalLightData lightData =
                 frameData.Get<UniversalLightData>();
 
-            TextureHandle source =
-                resourceData.activeColorTexture;
-
-            TextureHandle cameraDepth =
-                resourceData.activeDepthTexture;
-
             if (resourceData.isActiveTargetBackBuffer)
                 return;
 
+            // Mask pass (mesafe kesme) ve Composite pass (renk/genislik)
+            // materyal ozelliklerine ihtiyac duydugu icin herhangi bir
+            // pass eklenmeden once uygulanmali.
+            ApplyLayerProfiles();
+
+            TextureHandle source = resourceData.activeColorTexture;
+
+            RenderTextureDescriptor fullDesc = cameraData.cameraTargetDescriptor;
+
+            int scaledW = Mathf.Max(1, Mathf.RoundToInt(fullDesc.width * resolutionScale));
+            int scaledH = Mathf.Max(1, Mathf.RoundToInt(fullDesc.height * resolutionScale));
+
             // =====================================================
-            // MASK
+            // MASK (scaled res). AlwaysVisible modunda mask pass ZTest
+            // Always kullanir (bkz. shader), yani gercek kamera derinligine
+            // bagimli degildir - bu yuzden dogrudan dusuk cozunurlukte
+            // render edebiliyoruz, ekstra downsample pass'ine gerek yok.
             // =====================================================
 
-            RenderTextureDescriptor maskDescriptor =
-                cameraData.cameraTargetDescriptor;
-
+            RenderTextureDescriptor maskDescriptor = fullDesc;
+            maskDescriptor.width = scaledW;
+            maskDescriptor.height = scaledH;
             maskDescriptor.msaaSamples = 1;
             maskDescriptor.depthBufferBits = 0;
-            maskDescriptor.colorFormat =
-                RenderTextureFormat.R8;
+            maskDescriptor.colorFormat = RenderTextureFormat.R8;
             maskDescriptor.sRGB = false;
 
-            TextureHandle maskTexture =
-                UniversalRenderer.CreateRenderGraphTexture(
-                    renderGraph,
-                    maskDescriptor,
-                    "Lightweight Outline Mask",
-                    false
-                );
+            TextureHandle maskTexture = UniversalRenderer.CreateRenderGraphTexture(
+                renderGraph, maskDescriptor, "Lightweight Outline Mask", false);
 
             // =====================================================
-            // SELECTED DEPTH
+            // JFA PING-PONG (scaled res, RGFloat = seed UV, x<0 => empty)
             // =====================================================
 
-            RenderTextureDescriptor selectedDepthDescriptor =
-                cameraData.cameraTargetDescriptor;
+            RenderTextureDescriptor jfaDescriptor = fullDesc;
+            jfaDescriptor.width = scaledW;
+            jfaDescriptor.height = scaledH;
+            jfaDescriptor.msaaSamples = 1;
+            jfaDescriptor.depthBufferBits = 0;
+            jfaDescriptor.colorFormat = RenderTextureFormat.RGFloat;
+            jfaDescriptor.sRGB = false;
 
-            selectedDepthDescriptor.msaaSamples = 1;
-            selectedDepthDescriptor.depthBufferBits = 0;
-            selectedDepthDescriptor.colorFormat =
-                RenderTextureFormat.RFloat;
-            selectedDepthDescriptor.sRGB = false;
+            TextureHandle jfaA = UniversalRenderer.CreateRenderGraphTexture(
+                renderGraph, jfaDescriptor, "Lightweight Outline JFA A", false);
 
-            TextureHandle selectedDepthTexture =
-                UniversalRenderer.CreateRenderGraphTexture(
-                    renderGraph,
-                    selectedDepthDescriptor,
-                    "Lightweight Outline Selected Depth",
-                    false
-                );
+            TextureHandle jfaB = UniversalRenderer.CreateRenderGraphTexture(
+                renderGraph, jfaDescriptor, "Lightweight Outline JFA B", false);
 
             // =====================================================
-            // FILTERING
+            // FILTERING / DRAWING SETTINGS
             // =====================================================
 
-            FilteringSettings filteringSettings =
-                new FilteringSettings(
-                    RenderQueueRange.all,
-                    -1,
-                    renderingLayerMask,
-                    0
-                );
+            FilteringSettings filteringSettings = new FilteringSettings(
+                RenderQueueRange.all, -1, renderingLayerMask, 0);
 
-            SortingCriteria sortingCriteria =
-                cameraData.defaultOpaqueSortFlags;
+            SortingCriteria sortingCriteria = cameraData.defaultOpaqueSortFlags;
 
-            List<ShaderTagId> shaderTags =
-                new List<ShaderTagId>
-                {
-                    new ShaderTagId("UniversalForward"),
-                    new ShaderTagId("UniversalForwardOnly"),
-                    new ShaderTagId("SRPDefaultUnlit")
-                };
+            DrawingSettings drawingSettings = RenderingUtils.CreateDrawingSettings(
+                ShaderTags, renderingData, cameraData, lightData, sortingCriteria);
 
-            DrawingSettings drawingSettings =
-                RenderingUtils.CreateDrawingSettings(
-                    shaderTags,
-                    renderingData,
-                    cameraData,
-                    lightData,
-                    sortingCriteria
-                );
+            // ---- Mask renderer list
+            drawingSettings.overrideMaterial = maskMaterial;
+            drawingSettings.overrideMaterialPassIndex = PassMask;
 
-            // =====================================================
-            // MASK RENDERER LIST
-            // =====================================================
-
-            drawingSettings.overrideMaterial =
-                maskMaterial;
-
-            drawingSettings.overrideMaterialPassIndex =
-                0;
-
-            RendererListParams maskParams =
-                new RendererListParams(
-                    renderingData.cullResults,
-                    drawingSettings,
-                    filteringSettings
-                );
-
-            RendererListHandle maskRendererList =
-                renderGraph.CreateRendererList(
-                    maskParams
-                );
-
-            // =====================================================
-            // SELECTED DEPTH RENDERER LIST
-            // =====================================================
-
-            drawingSettings.overrideMaterial =
-                maskMaterial;
-
-            drawingSettings.overrideMaterialPassIndex =
-                1;
-
-            RendererListParams depthParams =
-                new RendererListParams(
-                    renderingData.cullResults,
-                    drawingSettings,
-                    filteringSettings
-                );
-
-            RendererListHandle depthRendererList =
-                renderGraph.CreateRendererList(
-                    depthParams
-                );
+            RendererListHandle maskRendererList = renderGraph.CreateRendererList(
+                new RendererListParams(renderingData.cullResults, drawingSettings, filteringSettings));
 
             // =====================================================
             // MASK PASS
             // =====================================================
 
-            using (
-                var builder =
-                    renderGraph.AddRasterRenderPass<MaskPassData>(
-                        "Lightweight Outline - Mask",
-                        out var passData
-                    )
-            )
+            using (var builder = renderGraph.AddRasterRenderPass<MaskPassData>(
+                "Lightweight Outline - Mask", out var passData))
             {
-                passData.rendererList =
-                    maskRendererList;
+                passData.rendererList = maskRendererList;
 
-                builder.UseRendererList(
-                    passData.rendererList
-                );
-
-                builder.SetRenderAttachment(
-                    maskTexture,
-                    0,
-                    AccessFlags.Write
-                );
-
-                builder.SetRenderAttachmentDepth(
-                    cameraDepth,
-                    AccessFlags.Read
-                );
-
-                builder.SetGlobalTextureAfterPass(
-                    maskTexture,
-                    OutlineMaskID
-                );
-
+                builder.UseRendererList(passData.rendererList);
+                builder.SetRenderAttachment(maskTexture, 0, AccessFlags.Write);
+                builder.SetGlobalTextureAfterPass(maskTexture, OutlineMaskID);
                 builder.AllowPassCulling(false);
 
-                builder.SetRenderFunc(
-                    static (
-                        MaskPassData data,
-                        RasterGraphContext context
-                    ) =>
-                    {
-                        context.cmd.ClearRenderTarget(
-                            false,
-                            true,
-                            Color.black
-                        );
-
-                        context.cmd.DrawRendererList(
-                            data.rendererList
-                        );
-                    }
-                );
+                builder.SetRenderFunc(static (MaskPassData data, RasterGraphContext context) =>
+                {
+                    context.cmd.ClearRenderTarget(false, true, Color.black);
+                    context.cmd.DrawRendererList(data.rendererList);
+                });
             }
 
             // =====================================================
-            // SELECTED DEPTH PASS
+            // JFA INIT: maskTexture -> jfaA (seed = kendi UV'si ya da -1,-1)
             // =====================================================
 
-            using (
-                var builder =
-                    renderGraph.AddRasterRenderPass<SelectedDepthPassData>(
-                        "Lightweight Outline - Selected Depth",
-                        out var passData
-                    )
-            )
+            using (var builder = renderGraph.AddRasterRenderPass<JfaBlitPassData>(
+                "Lightweight Outline - JFA Init", out var passData))
             {
-                passData.rendererList =
-                    depthRendererList;
+                passData.source = maskTexture;
+                passData.material = outlineMaterial;
+                passData.passIndex = PassJfaInit;
 
-                builder.UseRendererList(
-                    passData.rendererList
-                );
-
-                builder.SetRenderAttachment(
-                    selectedDepthTexture,
-                    0,
-                    AccessFlags.Write
-                );
-
-                builder.SetGlobalTextureAfterPass(
-                    selectedDepthTexture,
-                    SelectedDepthID
-                );
-
-                builder.SetGlobalTextureAfterPass(
-                    cameraDepth,
-                    CameraDepthID
-                );
-
+                builder.UseTexture(passData.source, AccessFlags.Read);
+                builder.SetRenderAttachment(jfaA, 0, AccessFlags.Write);
                 builder.AllowPassCulling(false);
 
-                builder.SetRenderFunc(
-                    static (
-                        SelectedDepthPassData data,
-                        RasterGraphContext context
-                    ) =>
-                    {
-                        context.cmd.ClearRenderTarget(
-                            false,
-                            true,
-                            Color.black
-                        );
-
-                        context.cmd.DrawRendererList(
-                            data.rendererList
-                        );
-                    }
-                );
+                builder.SetRenderFunc(static (JfaBlitPassData data, RasterGraphContext context) =>
+                {
+                    Blitter.BlitTexture(context.cmd, data.source, new Vector4(1, 1, 0, 0),
+                        data.material, data.passIndex);
+                });
             }
 
             // =====================================================
-            // DESTINATION
+            // JFA STEPS (ping-pong jfaA <-> jfaB)
             // =====================================================
 
-            RenderTextureDescriptor destinationDescriptor =
-                cameraData.cameraTargetDescriptor;
+            List<int> steps = BuildStepSizes(scaledW, scaledH);
 
+            TextureHandle jfaSrc = jfaA;
+            TextureHandle jfaDst = jfaB;
+
+            for (int i = 0; i < steps.Count; i++)
+            {
+                float stepSize = steps[i];
+
+                using (var builder = renderGraph.AddRasterRenderPass<JfaBlitPassData>(
+                    "Lightweight Outline - JFA Step", out var passData))
+                {
+                    passData.source = jfaSrc;
+                    passData.material = outlineMaterial;
+                    passData.passIndex = PassJfaStep;
+                    passData.step = stepSize;
+
+                    builder.UseTexture(passData.source, AccessFlags.Read);
+                    builder.SetRenderAttachment(jfaDst, 0, AccessFlags.Write);
+                    builder.AllowGlobalStateModification(true);
+
+                    if (i == steps.Count - 1)
+                        builder.SetGlobalTextureAfterPass(jfaDst, JfaSeedID);
+
+                    builder.AllowPassCulling(false);
+
+                    builder.SetRenderFunc(static (JfaBlitPassData data, RasterGraphContext context) =>
+                    {
+                        context.cmd.SetGlobalFloat(JfaStepID, data.step);
+                        Blitter.BlitTexture(context.cmd, data.source, new Vector4(1, 1, 0, 0),
+                            data.material, data.passIndex);
+                    });
+                }
+
+                (jfaSrc, jfaDst) = (jfaDst, jfaSrc);
+            }
+
+            // _JFASeedTex global'i artik son JFA step'in ciktisina isaret ediyor.
+
+            // =====================================================
+            // COMPOSITE (full res)
+            // =====================================================
+
+            RenderTextureDescriptor destinationDescriptor = fullDesc;
             destinationDescriptor.msaaSamples = 1;
             destinationDescriptor.depthBufferBits = 0;
 
-            TextureHandle destination =
-                UniversalRenderer.CreateRenderGraphTexture(
-                    renderGraph,
-                    destinationDescriptor,
-                    "Lightweight Outline Result",
-                    false
-                );
+            TextureHandle destination = UniversalRenderer.CreateRenderGraphTexture(
+                renderGraph, destinationDescriptor, "Lightweight Outline Result", false);
 
-            // =====================================================
-            // MATERIAL
-            // =====================================================
-
-            ApplyLayerProfiles();
-
-            // =====================================================
-            // COMPOSITE
-            // =====================================================
-
-            using (
-                var builder =
-                    renderGraph.AddRasterRenderPass<OutlinePassData>(
-                        "Lightweight Outline - Composite",
-                        out var passData
-                    )
-            )
+            using (var builder = renderGraph.AddRasterRenderPass<CompositePassData>(
+                "Lightweight Outline - Composite", out var passData))
             {
-                passData.source =
-                    source;
+                passData.source = source;
+                passData.material = outlineMaterial;
 
-                passData.material =
-                    outlineMaterial;
-
-                builder.UseTexture(
-                    passData.source,
-                    AccessFlags.Read
-                );
-
-                builder.UseGlobalTexture(
-                    OutlineMaskID,
-                    AccessFlags.Read
-                );
-
-                builder.UseGlobalTexture(
-                    SelectedDepthID,
-                    AccessFlags.Read
-                );
-
-                builder.UseGlobalTexture(
-                    CameraDepthID,
-                    AccessFlags.Read
-                );
-
-                builder.SetRenderAttachment(
-                    destination,
-                    0,
-                    AccessFlags.Write
-                );
-
+                builder.UseTexture(passData.source, AccessFlags.Read);
+                builder.UseGlobalTexture(OutlineMaskID, AccessFlags.Read);
+                builder.UseGlobalTexture(JfaSeedID, AccessFlags.Read);
+                builder.SetRenderAttachment(destination, 0, AccessFlags.Write);
                 builder.AllowPassCulling(false);
 
-                builder.SetRenderFunc(
-                    static (
-                        OutlinePassData data,
-                        RasterGraphContext context
-                    ) =>
-                    {
-                        Blitter.BlitTexture(
-                            context.cmd,
-                            data.source,
-                            new Vector4(
-                                1f,
-                                1f,
-                                0f,
-                                0f
-                            ),
-                            data.material,
-                            2
-                        );
-                    }
-                );
+                builder.SetRenderFunc(static (CompositePassData data, RasterGraphContext context) =>
+                {
+                    Blitter.BlitTexture(context.cmd, data.source, new Vector4(1, 1, 0, 0),
+                        data.material, PassComposite);
+                });
             }
 
-            resourceData.cameraColor =
-                destination;
+            resourceData.cameraColor = destination;
         }
     }
 }
