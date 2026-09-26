@@ -33,6 +33,22 @@ public class LightweightOutlineFeature : ScriptableRendererFeature
         )]
         [Min(0f)]
         public float renderDistance = 0f;
+
+        [Tooltip(
+            "Acik: bu layer normal derinlik testi kullanir; obje baska bir " +
+            "seyin (duvar vb.) arkasina girdiginde outline kaybolur.\n" +
+            "Kapali: X-Ray modu; outline derinlikten bagimsiz her zaman gorunur."
+        )]
+        public bool depthTest = true;
+
+        [Tooltip(
+            "Depth Test acikken kullanilan bias (world units, metre). " +
+            "Mask pass dusuk cozunurlukte calistigi icin siluet kenarlarinda " +
+            "olusabilecek yanlis-occlusion titremesini onlemek icin kucuk " +
+            "bir tolerans eklenir."
+        )]
+        [Min(0f)]
+        public float depthBias = 0.05f;
     }
 
     // =============================================================
@@ -117,6 +133,12 @@ public class LightweightOutlineFeature : ScriptableRendererFeature
 
         outlinePass.renderPassEvent =
             settings.renderPassEvent;
+
+        // Per-layer depth test icin Mask pass'te _CameraDepthTexture
+        // sample ediyoruz; bu, URP Asset'teki "Depth Texture" checkbox'i
+        // kapali olsa bile gerekli copy-depth pass'inin calismasini
+        // garanti eder.
+        outlinePass.ConfigureInput(ScriptableRenderPassInput.Depth);
     }
 
     // =============================================================
@@ -227,6 +249,7 @@ public class LightweightOutlineFeature : ScriptableRendererFeature
         private readonly Color[] cachedColors = new Color[32];
         private readonly Vector4[] cachedWidths = new Vector4[32];
         private readonly Vector4[] cachedRenderDistance = new Vector4[32];
+        private readonly Vector4[] cachedDepthTest = new Vector4[32];
         private readonly List<int> cachedSteps = new List<int>(16);
 
         private static readonly List<ShaderTagId> ShaderTags = new List<ShaderTagId>
@@ -266,6 +289,9 @@ public class LightweightOutlineFeature : ScriptableRendererFeature
 
         private static readonly int LayerRenderDistanceID =
             Shader.PropertyToID("_LayerRenderDistance");
+
+        private static readonly int LayerDepthTestID =
+            Shader.PropertyToID("_LayerDepthTest");
 
         // =========================================================
         // PASS DATA
@@ -333,6 +359,7 @@ public class LightweightOutlineFeature : ScriptableRendererFeature
                 cachedColors[i] = Color.white;
                 cachedWidths[i] = new Vector4(2f, 0f, 0f, 0f);
                 cachedRenderDistance[i] = new Vector4(0f, 0f, 0f, 0f); // 0 = sinirsiz
+                cachedDepthTest[i] = new Vector4(0f, 0.05f, 0f, 0f); // x=0 (kapali/X-Ray), y=bias
             }
 
             if (layerProfiles != null)
@@ -357,6 +384,14 @@ public class LightweightOutlineFeature : ScriptableRendererFeature
 
                     cachedRenderDistance[layer] =
                         new Vector4(Mathf.Max(0f, profile.renderDistance), 0f, 0f, 0f);
+
+                    // x = depth test acik mi (1/0), y = bias (world units)
+                    cachedDepthTest[layer] = new Vector4(
+                        profile.depthTest ? 1f : 0f,
+                        Mathf.Max(0f, profile.depthBias),
+                        0f,
+                        0f
+                    );
                 }
             }
 
@@ -367,6 +402,11 @@ public class LightweightOutlineFeature : ScriptableRendererFeature
             // boylece uzaktaki objeler icin JFA/Composite'e hic seed
             // gitmiyor.
             maskMaterial.SetVectorArray(LayerRenderDistanceID, cachedRenderDistance);
+
+            // Per-layer depth test (occlusion) ayari da Mask pass'te
+            // uygulaniyor: occluded olan piksel mask'a hic yazilmiyor,
+            // boylece JFA/Composite o pikseli hic gormuyor.
+            maskMaterial.SetVectorArray(LayerDepthTestID, cachedDepthTest);
         }
 
         // =========================================================
@@ -427,12 +467,21 @@ public class LightweightOutlineFeature : ScriptableRendererFeature
             if (resourceData.isActiveTargetBackBuffer)
                 return;
 
-            // Mask pass (mesafe kesme) ve Composite pass (renk/genislik)
-            // materyal ozelliklerine ihtiyac duydugu icin herhangi bir
-            // pass eklenmeden once uygulanmali.
+            // Mask pass (mesafe/derinlik kesme) ve Composite pass
+            // (renk/genislik) materyal ozelliklerine ihtiyac duydugu icin
+            // herhangi bir pass eklenmeden once uygulanmali.
             ApplyLayerProfiles();
 
             TextureHandle source = resourceData.activeColorTexture;
+
+            // Per-layer depth test icin sahne depth texture'ina ihtiyacimiz
+            // var (Opaque pass'ten sonra populate edilmis olmali - bu yuzden
+            // renderPassEvent varsayilani BeforeRenderingPostProcessing).
+            // Mask pass'te bunu bir depth-stencil ATTACHMENT olarak degil,
+            // fragment shader icinde SampleSceneDepth() ile TEXTURE olarak
+            // okuyoruz (_CameraDepthTexture) - bu yuzden dogru RenderGraph
+            // resource'u activeDepthTexture degil, cameraDepthTexture'dir.
+            TextureHandle cameraDepthTexture = resourceData.cameraDepthTexture;
 
             RenderTextureDescriptor fullDesc = cameraData.cameraTargetDescriptor;
 
@@ -440,10 +489,11 @@ public class LightweightOutlineFeature : ScriptableRendererFeature
             int scaledH = Mathf.Max(1, Mathf.RoundToInt(fullDesc.height * resolutionScale));
 
             // =====================================================
-            // MASK (scaled res). AlwaysVisible modunda mask pass ZTest
-            // Always kullanir (bkz. shader), yani gercek kamera derinligine
-            // bagimli degildir - bu yuzden dogrudan dusuk cozunurlukte
-            // render edebiliyoruz, ekstra downsample pass'ine gerek yok.
+            // MASK (scaled res). Per-layer depth test artik Mask pass
+            // icinde, _CameraDepthTexture manuel sample edilerek
+            // uygulaniyor (hardware ZTest attachment DEGIL, cunku mask
+            // hedefi scaled cozunurlukte ve gercek depth buffer'la
+            // boyut olarak eslesmiyor).
             // =====================================================
 
             RenderTextureDescriptor maskDescriptor = fullDesc;
@@ -505,6 +555,16 @@ public class LightweightOutlineFeature : ScriptableRendererFeature
 
                 builder.UseRendererList(passData.rendererList);
                 builder.SetRenderAttachment(maskTexture, 0, AccessFlags.Write);
+
+                // Per-layer depth test icin sahne depth'ini fragment
+                // shader'da manuel sample edecegiz; RenderGraph'a bu
+                // bagimliligi bildirmemiz gerekiyor ki dogru sirada
+                // hazir olsun ve culling ile atilmasin.
+                if (cameraDepthTexture.IsValid())
+                {
+                    builder.UseTexture(cameraDepthTexture, AccessFlags.Read);
+                }
+
                 builder.SetGlobalTextureAfterPass(maskTexture, OutlineMaskID);
                 builder.AllowPassCulling(false);
 

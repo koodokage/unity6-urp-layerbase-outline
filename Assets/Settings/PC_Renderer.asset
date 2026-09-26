@@ -71,38 +71,50 @@ MonoBehaviour:
   m_Active: 1
   settings:
     layerProfiles:
-    - layerName: Default
-      renderingLayer: 0
+    - layerName: Layer 1
+      renderingLayer: 4
       color: {r: 0.7490197, g: 0, b: 0, a: 1}
       width: 5
       renderDistance: 4
-    - layerName: Layer 1
-      renderingLayer: 1
+      depthTest: 1
+      depthBias: 0.05
+    - layerName: Layer 2
+      renderingLayer: 2
       color: {r: 0.7490196, g: 0.6755303, b: 0, a: 1}
       width: 5
       renderDistance: 1
-    - layerName: Layer 2
-      renderingLayer: 2
+      depthTest: 0
+      depthBias: 0.05
+    - layerName: Layer 3
+      renderingLayer: 3
       color: {r: 0.1433331, g: 0.7490196, b: 0, a: 1}
       width: 5
       renderDistance: 5
-    - layerName: Layer 3
-      renderingLayer: 3
+      depthTest: 1
+      depthBias: 0.05
+    - layerName: Layer 4
+      renderingLayer: 4
       color: {r: 0.7490196, g: 0, b: 0.6740595, a: 1}
       width: 5
       renderDistance: 5
-    - layerName: Layer 4
-      renderingLayer: 4
+      depthTest: 1
+      depthBias: 0.05
+    - layerName: Layer 5
+      renderingLayer: 5
       color: {r: 0.013569952, g: 0, b: 0.7490196, a: 1}
       width: 5
       renderDistance: 5
-    - layerName: Layer 5
-      renderingLayer: 5
+      depthTest: 1
+      depthBias: 0.05
+    - layerName: Layer 6
+      renderingLayer: 6
       color: {r: 0.7490196, g: 0.121036835, b: 0, a: 1}
       width: 5
       renderDistance: 5
+      depthTest: 1
+      depthBias: 0.05
     resolutionScale: 1
-    extraRefinementPasses: 0
+    extraRefinementPasses: 2
     renderPassEvent: 550
 --- !u!114 &7833122117494664109
 MonoBehaviour:

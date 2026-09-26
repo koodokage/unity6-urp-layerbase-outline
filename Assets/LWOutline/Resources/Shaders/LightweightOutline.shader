@@ -30,6 +30,7 @@ Shader "Hidden/Lightweight Outline"
             #pragma multi_compile_instancing
 
             #include "Packages/com.unity.render-pipelines.universal/ShaderLibrary/Core.hlsl"
+            #include "Packages/com.unity.render-pipelines.universal/ShaderLibrary/DeclareDepthTexture.hlsl"
 
             struct MaskAttributes
             {
@@ -47,6 +48,10 @@ Shader "Hidden/Lightweight Outline"
             // x = bu layer'a ait maksimum outline mesafesi (world units).
             // 0 = sinirsiz.
             float4 _LayerRenderDistance[32];
+
+            // x = depth test acik mi (1 = normal occlusion, 0 = X-Ray/her
+            // zaman gorunur), y = depth bias (world units).
+            float4 _LayerDepthTest[32];
 
             MaskVaryings MaskVertex(MaskAttributes input)
             {
@@ -78,6 +83,26 @@ Shader "Hidden/Lightweight Outline"
                 return 0u;
             }
 
+            // Bu mask fragment'inin, sahnenin (opak) derinligine gore
+            // gizli (occluded) olup olmadigini soyler. Mask hedefi scaled
+            // cozunurlukte oldugu icin hardware ZTest attachment yerine
+            // _CameraDepthTexture'i UV uzerinden manuel sample ediyoruz -
+            // UV 0..1 araligi cozunurlukten bagimsiz oldugu icin bu
+            // guvenilir sekilde calisir.
+            bool IsOccluded(float4 positionCS, float bias)
+            {
+                float2 screenUV = positionCS.xy / _ScreenParams.xy;
+
+                float sceneRawDepth = SampleSceneDepth(screenUV);
+
+                float sceneEyeDepth = LinearEyeDepth(sceneRawDepth, _ZBufferParams);
+                float myEyeDepth = LinearEyeDepth(positionCS.z, _ZBufferParams);
+
+                // Sahnede benden daha yakin (daha kucuk eye depth) bir
+                // seyler varsa, ben occluded'im.
+                return sceneEyeDepth + bias < myEyeDepth;
+            }
+
             half4 MaskFragment(MaskVaryings input) : SV_Target
             {
                 uint layerID = GetOutlineLayerID();
@@ -85,6 +110,7 @@ Shader "Hidden/Lightweight Outline"
                 if (layerID != 0u)
                 {
                     uint index = min(layerID - 1u, 31u);
+
                     float maxDistance = _LayerRenderDistance[index].x;
 
                     if (maxDistance > 0.0)
@@ -92,6 +118,20 @@ Shader "Hidden/Lightweight Outline"
                         float camDistance = distance(input.positionWS, GetCameraPositionWS());
 
                         if (camDistance > maxDistance)
+                            layerID = 0u;
+                    }
+                }
+
+                if (layerID != 0u)
+                {
+                    uint index = min(layerID - 1u, 31u);
+
+                    float depthTestEnabled = _LayerDepthTest[index].x;
+                    float depthBias = _LayerDepthTest[index].y;
+
+                    if (depthTestEnabled > 0.5)
+                    {
+                        if (IsOccluded(input.positionCS, depthBias))
                             layerID = 0u;
                     }
                 }
@@ -320,8 +360,11 @@ Shader "Hidden/Lightweight Outline"
                 if (distPixels > width + 1.0)
                     return sceneColor;
 
-                // AlwaysVisible: derinlik/occlusion testi yok, outline
-                // duvar/obje arkasindan da her zaman gorunur.
+                // Occlusion/derinlik kontrolu artik Mask pass'te layer
+                // bazinda yapiliyor: occluded ve depthTest=on olan
+                // pikseller mask'a hic yazilmadigi icin buraya seed
+                // olarak hic gelmiyorlar. Composite bu yuzden hala
+                // derinlikten bagimsiz, sadece maskelenmis veriyi okuyor.
                 float coverage = 1.0 - smoothstep(max(width - 1.0, 0.0), width, distPixels);
                 if (coverage <= 0.0)
                     return sceneColor;
