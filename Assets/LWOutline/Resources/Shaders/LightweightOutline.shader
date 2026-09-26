@@ -7,10 +7,9 @@ Shader "Hidden/Lightweight Outline"
             "RenderPipeline" = "UniversalPipeline"
         }
 
-
         // =========================================================
         // PASS 0
-        // MASK
+        // OUTLINE MASK
         // =========================================================
 
         Pass
@@ -23,56 +22,99 @@ Shader "Hidden/Lightweight Outline"
 
             Blend One Zero
 
-
             HLSLPROGRAM
 
             #pragma vertex MaskVertex
             #pragma fragment MaskFragment
 
+            #pragma multi_compile_instancing
 
             #include "Packages/com.unity.render-pipelines.universal/ShaderLibrary/Core.hlsl"
-
 
             struct MaskAttributes
             {
                 float4 positionOS : POSITION;
-            };
 
+                UNITY_VERTEX_INPUT_INSTANCE_ID
+            };
 
             struct MaskVaryings
             {
                 float4 positionCS : SV_POSITION;
-            };
 
+                UNITY_VERTEX_INPUT_INSTANCE_ID
+            };
 
             MaskVaryings MaskVertex(
                 MaskAttributes input)
             {
                 MaskVaryings output;
 
+                UNITY_SETUP_INSTANCE_ID(input);
+                UNITY_TRANSFER_INSTANCE_ID(input, output);
 
                 output.positionCS =
                     TransformObjectToHClip(
                         input.positionOS.xyz
                     );
 
-
                 return output;
             }
 
+            uint GetOutlineLayerID()
+            {
+                uint renderingLayers =
+                    GetMeshRenderingLayer();
+
+                /*
+                 * Rendering layer 0 -> ID 1
+                 * Rendering layer 1 -> ID 2
+                 * Rendering layer 2 -> ID 3
+                 * ...
+                 *
+                 * 0 means no outline.
+                 *
+                 * We select the first matching bit.
+                 */
+
+                [unroll]
+                for (uint i = 0u; i < 32u; i++)
+                {
+                    uint bit =
+                        1u << i;
+
+                    if ((renderingLayers & bit) != 0u)
+                    {
+                        return i + 1u;
+                    }
+                }
+
+                return 0u;
+            }
 
             half4 MaskFragment(
                 MaskVaryings input
             ) : SV_Target
             {
+                uint layerID =
+                    GetOutlineLayerID();
+
+                /*
+                 * R8 texture.
+                 *
+                 * 0 = no outline
+                 * 1 = rendering layer 0
+                 * 2 = rendering layer 1
+                 * ...
+                 */
+
                 return half4(
-                    1.0,
-                    1.0,
-                    1.0,
+                    layerID / 255.0,
+                    0.0,
+                    0.0,
                     1.0
                 );
             }
-
 
             ENDHLSL
         }
@@ -87,87 +129,64 @@ Shader "Hidden/Lightweight Outline"
         {
             Name "Selected Depth"
 
-            /*
-             * IMPORTANT
-             *
-             * This depth pass is NOT testing against the
-             * camera depth.
-             *
-             * We need the actual depth of the selected object
-             * even when another object is in front of it.
-             */
-
-            ZWrite On
-            ZTest LEqual
-
+            ZWrite Off
+            ZTest Always
             Cull Back
 
             Blend One Zero
-
 
             HLSLPROGRAM
 
             #pragma vertex SelectedDepthVertex
             #pragma fragment SelectedDepthFragment
 
+            #pragma multi_compile_instancing
 
             #include "Packages/com.unity.render-pipelines.universal/ShaderLibrary/Core.hlsl"
-
 
             struct DepthAttributes
             {
                 float4 positionOS : POSITION;
-            };
 
+                UNITY_VERTEX_INPUT_INSTANCE_ID
+            };
 
             struct DepthVaryings
             {
                 float4 positionCS : SV_POSITION;
-            };
 
+                UNITY_VERTEX_INPUT_INSTANCE_ID
+            };
 
             DepthVaryings SelectedDepthVertex(
                 DepthAttributes input)
             {
                 DepthVaryings output;
 
+                UNITY_SETUP_INSTANCE_ID(input);
+                UNITY_TRANSFER_INSTANCE_ID(input, output);
 
                 output.positionCS =
                     TransformObjectToHClip(
                         input.positionOS.xyz
                     );
 
-
                 return output;
             }
-
 
             float SelectedDepthFragment(
                 DepthVaryings input
             ) : SV_Target
             {
-                /*
-                 * Convert the selected object's depth
-                 * into linear eye depth.
-                 *
-                 * This gives us a world-like distance
-                 * along the camera view direction.
-                 */
                 float rawDepth =
                     input.positionCS.z /
                     input.positionCS.w;
 
-
-                float linearDepth =
-                    LinearEyeDepth(
-                        rawDepth,
-                        _ZBufferParams
-                    );
-
-
-                return linearDepth;
+                return LinearEyeDepth(
+                    rawDepth,
+                    _ZBufferParams
+                );
             }
-
 
             ENDHLSL
         }
@@ -175,7 +194,7 @@ Shader "Hidden/Lightweight Outline"
 
         // =========================================================
         // PASS 2
-        // FULLSCREEN COMPOSITE
+        // COMPOSITE
         // =========================================================
 
         Pass
@@ -188,67 +207,72 @@ Shader "Hidden/Lightweight Outline"
 
             Blend One Zero
 
-
             HLSLPROGRAM
 
             #pragma vertex Vert
             #pragma fragment Frag
 
-
             #include "Packages/com.unity.render-pipelines.universal/ShaderLibrary/Core.hlsl"
 
-
             // =====================================================
-            // TEXTURES
+            // BLIT SOURCE
             // =====================================================
 
             TEXTURE2D_X(_BlitTexture);
 
-            TEXTURE2D_X(_OutlineMask);
-            SAMPLER(sampler_OutlineMask);
+            // =====================================================
+            // OUTLINE MASK
+            // =====================================================
 
+            TEXTURE2D_X(_OutlineMask);
+
+            // =====================================================
+            // SELECTED DEPTH
+            // =====================================================
 
             TEXTURE2D_X(_SelectedDepth);
-            SAMPLER(sampler_SelectedDepth);
 
+            // =====================================================
+            // CAMERA DEPTH
+            // =====================================================
 
             TEXTURE2D_X(_CameraDepthTexture);
-            SAMPLER(sampler_CameraDepthTexture);
-
 
             // =====================================================
             // PARAMETERS
             // =====================================================
 
-            float4 _OutlineColor;
-
-            float _OutlineWidth;
-
-            float _GlowRadius;
-
-            float _GlowIntensity;
-
-            float _SmoothCorners;
-
-
-            float4 _IntersectionColor;
-
-            float _IntersectionThreshold;
-
-            float _IntersectionWidth;
-
-            float _IntersectionEnabled;
-
+            float _MaxOutlineWidth;
 
             // =====================================================
-            // FULLSCREEN TRIANGLE
+            // LAYER DATA
+            // =====================================================
+
+            /*
+             * 32 renk (HDR).
+             *
+             * Index 0 = Rendering Layer 0
+             * Index 1 = Rendering Layer 1
+             * ...
+             */
+
+            float4 _LayerColors[32];
+
+            /*
+             * x = occlusion mode (0 = VisibleOnly, 1 = AlwaysVisible)
+             * y = bu layer'a ait outline kalinligi (piksel)
+             */
+
+            float4 _LayerOcclusion[32];
+
+            // =====================================================
+            // FULLSCREEN
             // =====================================================
 
             struct Attributes
             {
                 uint vertexID : SV_VertexID;
             };
-
 
             struct Varyings
             {
@@ -257,70 +281,81 @@ Shader "Hidden/Lightweight Outline"
                 float2 uv : TEXCOORD0;
             };
 
-
             Varyings Vert(
                 Attributes input)
             {
                 Varyings output;
-
 
                 output.positionCS =
                     GetFullScreenTriangleVertexPosition(
                         input.vertexID
                     );
 
-
                 output.uv =
                     GetFullScreenTriangleTexCoord(
                         input.vertexID
                     );
 
-
                 return output;
             }
-
 
             // =====================================================
             // MASK
             // =====================================================
 
-            half SampleMask(float2 uv)
+            half SampleMask(
+                float2 uv)
             {
                 return SAMPLE_TEXTURE2D_X(
                     _OutlineMask,
-                    sampler_OutlineMask,
+                    sampler_PointClamp,
                     uv
                 ).r;
             }
 
+            uint SampleLayerID(
+                float2 uv)
+            {
+                half encoded =
+                    SampleMask(uv);
+
+                /*
+                 * R8 normalized:
+                 *
+                 * 1 / 255
+                 * 2 / 255
+                 * ...
+                 */
+
+                return (uint)
+                    round(
+                        encoded * 255.0
+                    );
+            }
 
             // =====================================================
-            // SELECTED DEPTH
+            // DEPTH
             // =====================================================
 
-            float SampleSelectedDepth(float2 uv)
+            float SampleSelectedDepth(
+                float2 uv)
             {
                 return SAMPLE_TEXTURE2D_X(
                     _SelectedDepth,
-                    sampler_SelectedDepth,
+                    sampler_PointClamp,
                     uv
                 ).r;
             }
 
-
-            // =====================================================
-            // CAMERA DEPTH
-            // =====================================================
-
-            float SampleCameraDepth(float2 uv)
+            float SampleCameraDepth(
+                float2 uv)
             {
                 float rawDepth =
                     SAMPLE_TEXTURE2D_X(
                         _CameraDepthTexture,
-                        sampler_CameraDepthTexture,
+                        sampler_PointClamp,
                         uv
                     ).r;
-
 
                 return LinearEyeDepth(
                     rawDepth,
@@ -328,503 +363,180 @@ Shader "Hidden/Lightweight Outline"
                 );
             }
 
-
             // =====================================================
-            // NORMAL OUTLINE
+            // LAYER
             // =====================================================
 
-            half GetOutline(
-                float2 uv,
-                float2 pixelSize)
+            float4 GetLayerColor(
+                uint layerID)
             {
-                half center =
-                    SampleMask(uv);
-
-
-                // -------------------------------------------------
-                // BASIC 4 DIRECTIONS
-                // -------------------------------------------------
-
-                half north =
-                    SampleMask(
-                        uv +
-                        float2(
-                            0.0,
-                            pixelSize.y
-                        )
-                    );
-
-
-                half south =
-                    SampleMask(
-                        uv +
-                        float2(
-                            0.0,
-                            -pixelSize.y
-                        )
-                    );
-
-
-                half east =
-                    SampleMask(
-                        uv +
-                        float2(
-                            pixelSize.x,
-                            0.0
-                        )
-                    );
-
-
-                half west =
-                    SampleMask(
-                        uv +
-                        float2(
-                            -pixelSize.x,
-                            0.0
-                        )
-                    );
-
-
-                half surrounding =
-                    max(
-                        max(
-                            north,
-                            south
-                        ),
-                        max(
-                            east,
-                            west
-                        )
-                    );
-
-
-                // -------------------------------------------------
-                // DIAGONALS
-                // -------------------------------------------------
-
-                half northEast =
-                    SampleMask(
-                        uv +
-                        float2(
-                            pixelSize.x,
-                            pixelSize.y
-                        )
-                    );
-
-
-                half northWest =
-                    SampleMask(
-                        uv +
-                        float2(
-                            -pixelSize.x,
-                            pixelSize.y
-                        )
-                    );
-
-
-                half southEast =
-                    SampleMask(
-                        uv +
-                        float2(
-                            pixelSize.x,
-                            -pixelSize.y
-                        )
-                    );
-
-
-                half southWest =
-                    SampleMask(
-                        uv +
-                        float2(
-                            -pixelSize.x,
-                            -pixelSize.y
-                        )
-                    );
-
-
-                half diagonal =
-                    max(
-                        max(
-                            northEast,
-                            northWest
-                        ),
-                        max(
-                            southEast,
-                            southWest
-                        )
-                    );
-
-
-                // -------------------------------------------------
-                // SMOOTH CORNERS
-                // -------------------------------------------------
-
-                half diagonalWeight =
-                    lerp(
-                        0.0,
-                        1.0,
-                        _SmoothCorners
-                    );
-
-
-                surrounding =
-                    max(
-                        surrounding,
-                        diagonal *
-                        diagonalWeight
-                    );
-
-
-                // -------------------------------------------------
-                // OUTSIDE ONLY
-                // -------------------------------------------------
-
-                return saturate(
-                    surrounding - center
-                );
-            }
-
-
-            // =====================================================
-            // GLOW
-            // =====================================================
-
-            half GetGlow(
-                float2 uv,
-                float2 pixelSize)
-            {
-                if (_GlowRadius <= 0.0 ||
-                    _GlowIntensity <= 0.0)
-                {
-                    return 0.0;
-                }
-
-
-                float2 stepSize =
-                    pixelSize *
-                    _GlowRadius;
-
-
-                half glow = 0.0;
-
-
-                glow += SampleMask(
-                    uv +
-                    float2(
-                        stepSize.x,
-                        0.0
-                    )
-                );
-
-
-                glow += SampleMask(
-                    uv +
-                    float2(
-                        -stepSize.x,
-                        0.0
-                    )
-                );
-
-
-                glow += SampleMask(
-                    uv +
-                    float2(
-                        0.0,
-                        stepSize.y
-                    )
-                );
-
-
-                glow += SampleMask(
-                    uv +
-                    float2(
-                        0.0,
-                        -stepSize.y
-                    )
-                );
-
-
-                glow += SampleMask(
-                    uv +
-                    float2(
-                        stepSize.x,
-                        stepSize.y
-                    )
-                );
-
-
-                glow += SampleMask(
-                    uv +
-                    float2(
-                        -stepSize.x,
-                        stepSize.y
-                    )
-                );
-
-
-                glow += SampleMask(
-                    uv +
-                    float2(
-                        stepSize.x,
-                        -stepSize.y
-                    )
-                );
-
-
-                glow += SampleMask(
-                    uv +
-                    float2(
-                        -stepSize.x,
-                        -stepSize.y
-                    )
-                );
-
-
-                glow *= 0.125;
-
-
-                return glow *
-                       _GlowIntensity;
-            }
-
-
-            // =====================================================
-            // INTERSECTION MASK
-            // =====================================================
-
-            half GetIntersection(
-                float2 uv)
-            {
-                if (_IntersectionEnabled <= 0.0)
+                if (layerID == 0u)
                     return 0.0;
 
+                uint index =
+                    layerID - 1u;
+
+                index =
+                    min(index, 31u);
+
+                return _LayerColors[index];
+            }
+
+            float GetLayerOcclusion(
+                uint layerID)
+            {
+                if (layerID == 0u)
+                    return 0.0;
+
+                uint index =
+                    layerID - 1u;
+
+                index =
+                    min(index, 31u);
+
+                return _LayerOcclusion[index].x;
+            }
+
+            float GetLayerWidth(
+                uint layerID)
+            {
+                if (layerID == 0u)
+                    return 0.0;
+
+                uint index =
+                    layerID - 1u;
+
+                index =
+                    min(index, 31u);
+
+                return _LayerOcclusion[index].y;
+            }
+
+            // =====================================================
+            // OCCLUSION
+            // =====================================================
+
+            float GetOcclusionVisibility(
+                float2 uv,
+                uint layerID)
+            {
+                if (layerID == 0u)
+                    return 0.0;
+
+                float alwaysVisible =
+                    GetLayerOcclusion(
+                        layerID
+                    );
+
+                /*
+                 * AlwaysVisible:
+                 *
+                 * Derinlik testi yapilmaz, her zaman gorunur.
+                 */
+
+                if (alwaysVisible > 0.5)
+                    return 1.0;
 
                 float selectedDepth =
                     SampleSelectedDepth(uv);
 
-
-                /*
-                 * No selected object at this pixel.
-                 */
                 if (selectedDepth <= 0.0001)
                     return 0.0;
 
-
-                float sceneDepth =
+                float cameraDepth =
                     SampleCameraDepth(uv);
 
+                /*
+                 * Obje sahnede gorunur durumda.
+                 */
+
+                if (selectedDepth <=
+                    cameraDepth + 0.001)
+                {
+                    return 1.0;
+                }
 
                 /*
-                 * Another object must be in front
-                 * of the selected object.
-                 *
-                 * Example:
-                 *
-                 * sceneDepth    = 9.98
-                 * selectedDepth = 10.00
-                 *
-                 * Difference    = 0.02
+                 * Obje baska bir yuzeyin arkasinda kaliyor.
                  */
-                float depthDifference =
-                    selectedDepth -
-                    sceneDepth;
 
-
-                /*
-                 * If the selected object is not behind
-                 * the camera-visible surface, this isn't
-                 * an intersection.
-                 */
-                if (depthDifference <= 0.0)
-                    return 0.0;
-
-
-                /*
-                 * Only detect surfaces that are close
-                 * enough to each other.
-                 *
-                 * This prevents a completely hidden object
-                 * from getting an outline across its entire
-                 * surface.
-                 */
-                float intersection =
-                    1.0 -
-                    smoothstep(
-                        0.0,
-                        _IntersectionThreshold,
-                        depthDifference
-                    );
-
-
-                return intersection;
+                return 0.0;
             }
 
-
             // =====================================================
-            // INTERSECTION EDGE
+            // NEAREST OBJECT SEARCH
+            //
+            // Arka plan pikselinden 4 yonde disari dogru yuruyerek
+            // en yakin objeyi ve mesafeyi bulur. Her objenin kendi
+            // width degeri ile karsilastirilir.
             // =====================================================
 
-            half GetIntersectionEdge(
+            void FindNearestOutline(
                 float2 uv,
-                float2 pixelSize)
+                float2 pixelSize,
+                int maxSteps,
+                out uint outLayerID,
+                out float2 outUV)
             {
-                if (_IntersectionEnabled <= 0.0)
-                    return 0.0;
+                outLayerID = 0u;
+                outUV = uv;
 
-
-                half center =
-                    GetIntersection(uv);
-
+                float bestDistance =
+                    1e6;
 
                 /*
-                 * If there is no intersection at the center,
-                 * still check surrounding pixels.
+                 * 8 yon (kardinal + capraz): sadece 4 kardinal
+                 * yon kullanilirsa outline siluetli/kose kose
+                 * (diamond shape) gorunur. Capraz yonler eklenince
+                 * cok daha yuvarlak ve pürüzsüz bir kenar elde
+                 * edilir.
                  */
-                half north =
-                    GetIntersection(
-                        uv +
-                        float2(
-                            0.0,
-                            pixelSize.y *
-                            _IntersectionWidth
-                        )
-                    );
 
+                float2 directions[8] =
+                {
+                    float2(0.0, 1.0),
+                    float2(0.0, -1.0),
+                    float2(1.0, 0.0),
+                    float2(-1.0, 0.0),
+                    float2(0.70710678, 0.70710678),
+                    float2(-0.70710678, 0.70710678),
+                    float2(0.70710678, -0.70710678),
+                    float2(-0.70710678, -0.70710678)
+                };
 
-                half south =
-                    GetIntersection(
-                        uv +
-                        float2(
-                            0.0,
-                            -pixelSize.y *
-                            _IntersectionWidth
-                        )
-                    );
+                [loop]
+                for (int d = 0; d < 8; d++)
+                {
+                    [loop]
+                    for (int s = 1; s <= maxSteps; s++)
+                    {
+                        float2 sampleUV =
+                            uv +
+                            directions[d] *
+                            pixelSize *
+                            (float) s;
 
+                        uint lid =
+                            SampleLayerID(sampleUV);
 
-                half east =
-                    GetIntersection(
-                        uv +
-                        float2(
-                            pixelSize.x *
-                            _IntersectionWidth,
-                            0.0
-                        )
-                    );
+                        if (lid != 0u)
+                        {
+                            float layerWidth =
+                                GetLayerWidth(lid);
 
+                            if ((float) s <= layerWidth &&
+                                (float) s < bestDistance)
+                            {
+                                bestDistance = (float) s;
+                                outLayerID = lid;
+                                outUV = sampleUV;
+                            }
 
-                half west =
-                    GetIntersection(
-                        uv +
-                        float2(
-                            -pixelSize.x *
-                            _IntersectionWidth,
-                            0.0
-                        )
-                    );
-
-
-                half northEast =
-                    GetIntersection(
-                        uv +
-                        float2(
-                            pixelSize.x *
-                            _IntersectionWidth,
-                            pixelSize.y *
-                            _IntersectionWidth
-                        )
-                    );
-
-
-                half northWest =
-                    GetIntersection(
-                        uv +
-                        float2(
-                            -pixelSize.x *
-                            _IntersectionWidth,
-                            pixelSize.y *
-                            _IntersectionWidth
-                        )
-                    );
-
-
-                half southEast =
-                    GetIntersection(
-                        uv +
-                        float2(
-                            pixelSize.x *
-                            _IntersectionWidth,
-                            -pixelSize.y *
-                            _IntersectionWidth
-                        )
-                    );
-
-
-                half southWest =
-                    GetIntersection(
-                        uv +
-                        float2(
-                            -pixelSize.x *
-                            _IntersectionWidth,
-                            -pixelSize.y *
-                            _IntersectionWidth
-                        )
-                    );
-
-
-                half surrounding =
-                    max(
-                        max(
-                            north,
-                            south
-                        ),
-                        max(
-                            east,
-                            west
-                        )
-                    );
-
-
-                surrounding =
-                    max(
-                        surrounding,
-                        max(
-                            max(
-                                northEast,
-                                northWest
-                            ),
-                            max(
-                                southEast,
-                                southWest
-                            )
-                        )
-                    );
-
-
-                /*
-                 * Only the border of the intersection region.
-                 */
-                half edge =
-                    saturate(
-                        surrounding -
-                        center
-                    );
-
-
-                /*
-                 * If the intersection itself is very thin,
-                 * keep the center visible too.
-                 */
-                edge =
-                    max(
-                        edge,
-                        center * 0.5
-                    );
-
-
-                return edge;
+                            break;
+                        }
+                    }
+                }
             }
-
 
             // =====================================================
             // FRAGMENT
@@ -837,11 +549,6 @@ Shader "Hidden/Lightweight Outline"
                 float2 uv =
                     input.uv;
 
-
-                // -------------------------------------------------
-                // SCENE
-                // -------------------------------------------------
-
                 half4 sceneColor =
                     SAMPLE_TEXTURE2D_X(
                         _BlitTexture,
@@ -849,104 +556,109 @@ Shader "Hidden/Lightweight Outline"
                         uv
                     );
 
+                // -------------------------------------------------
+                // Outline objenin ustune degil, sadece etrafina
+                // cizilir.
+                // -------------------------------------------------
 
-                // -------------------------------------------------
-                // PIXEL SIZE
-                // -------------------------------------------------
+                uint centerLayerID =
+                    SampleLayerID(uv);
+
+                if (centerLayerID != 0u)
+                    return sceneColor;
 
                 float2 pixelSize =
                     1.0 /
                     _ScreenParams.xy;
 
-
-                // -------------------------------------------------
-                // NORMAL OUTLINE
-                // -------------------------------------------------
-
-                float2 outlinePixelSize =
-                    pixelSize *
-                    _OutlineWidth;
-
-
-                half outline =
-                    GetOutline(
-                        uv,
-                        outlinePixelSize
+                int maxSteps =
+                    max(
+                        1,
+                        (int) ceil(_MaxOutlineWidth)
                     );
 
-
                 // -------------------------------------------------
-                // GLOW
+                // SMOOTH / AA
+                //
+                // Tek merkez ornegi yerine piksel icinde 4 alt
+                // nokta (rotated grid) ornekleniyor. Kenar
+                // bolgesinde bazi alt noktalar isabet ediyor,
+                // bazilari etmiyor; bu da yumusak (anti-alias)
+                // bir gecis (kismi kapsama / coverage) sagliyor.
                 // -------------------------------------------------
 
-                half glow =
-                    GetGlow(
-                        uv,
-                        pixelSize
+                float2 subOffsets[4] =
+                {
+                    float2(0.25, 0.25),
+                    float2(-0.25, 0.25),
+                    float2(0.25, -0.25),
+                    float2(-0.25, -0.25)
+                };
+
+                float coverage =
+                    0.0;
+
+                half3 colorAccum =
+                    0.0;
+
+                [loop]
+                for (int ss = 0; ss < 4; ss++)
+                {
+                    float2 subUV =
+                        uv +
+                        subOffsets[ss] *
+                        pixelSize;
+
+                    uint hitLayerID;
+                    float2 hitUV;
+
+                    FindNearestOutline(
+                        subUV,
+                        pixelSize,
+                        maxSteps,
+                        hitLayerID,
+                        hitUV
                     );
 
+                    if (hitLayerID == 0u)
+                        continue;
 
-                /*
-                 * Glow should not overpower the
-                 * actual outline.
-                 */
-                glow *=
-                    (1.0 - outline);
+                    float visibility =
+                        GetOcclusionVisibility(
+                            hitUV,
+                            hitLayerID
+                        );
 
+                    if (visibility <= 0.0)
+                        continue;
 
-                // -------------------------------------------------
-                // INTERSECTION
-                // -------------------------------------------------
+                    float4 layerColor =
+                        GetLayerColor(
+                            hitLayerID
+                        );
 
-                half intersection =
-                    GetIntersectionEdge(
-                        uv,
-                        pixelSize
-                    );
+                    coverage +=
+                        0.25;
 
+                    colorAccum +=
+                        layerColor.rgb *
+                        layerColor.a *
+                        0.25;
+                }
 
-                // -------------------------------------------------
-                // RESULT
-                // -------------------------------------------------
+                if (coverage <= 0.0)
+                    return sceneColor;
+
+                half3 outlineColor =
+                    colorAccum /
+                    max(coverage, 0.0001);
 
                 half3 result =
-                    sceneColor.rgb;
-
-
-                // -------------------------------------------------
-                // NORMAL OUTLINE
-                // -------------------------------------------------
-
-                result =
                     lerp(
-                        result,
-                        _OutlineColor.rgb,
-                        outline *
-                        _OutlineColor.a
+                        sceneColor.rgb,
+                        outlineColor,
+                        coverage
                     );
-
-
-                // -------------------------------------------------
-                // INTERSECTION OUTLINE
-                // -------------------------------------------------
-
-                result =
-                    lerp(
-                        result,
-                        _IntersectionColor.rgb,
-                        intersection *
-                        _IntersectionColor.a
-                    );
-
-
-                // -------------------------------------------------
-                // GLOW
-                // -------------------------------------------------
-
-                result +=
-                    _OutlineColor.rgb *
-                    glow;
-
 
                 return half4(
                     result,
@@ -954,11 +666,9 @@ Shader "Hidden/Lightweight Outline"
                 );
             }
 
-
             ENDHLSL
         }
     }
-
 
     FallBack Off
 }

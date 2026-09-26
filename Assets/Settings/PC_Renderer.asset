@@ -1,32 +1,5 @@
 %YAML 1.1
 %TAG !u! tag:unity3d.com,2011:
---- !u!114 &-339642376712113628
-MonoBehaviour:
-  m_ObjectHideFlags: 0
-  m_CorrespondingSourceObject: {fileID: 0}
-  m_PrefabInstance: {fileID: 0}
-  m_PrefabAsset: {fileID: 0}
-  m_GameObject: {fileID: 0}
-  m_Enabled: 1
-  m_EditorHideFlags: 0
-  m_Script: {fileID: 11500000, guid: bbded775df026964b91c750c5f7862cd, type: 3}
-  m_Name: LightweightOutlineFeature
-  m_EditorClassIdentifier: Assembly-CSharp::LightweightOutlineFeature
-  m_Active: 1
-  settings:
-    color: {r: 41.73181, g: 1.5996208, b: 0, a: 1}
-    width: 4.6
-    glowRadius: 2.36
-    glowIntensity: 0
-    smoothCorners: 1
-    layerMask:
-      serializedVersion: 2
-      m_Bits: 16
-    intersectionEnabled: 0
-    intersectionColor: {r: 1, g: 0, b: 0, a: 1}
-    intersectionThreshold: 11.29
-    intersectionWidth: 7.46
-    renderPassEvent: 550
 --- !u!114 &11400000
 MonoBehaviour:
   m_ObjectHideFlags: 0
@@ -53,8 +26,8 @@ MonoBehaviour:
     probeVolumeBlendStatesCS: {fileID: 7200000, guid: b9a23f869c4fd45f19c5ada54dd82176, type: 3}
   m_RendererFeatures:
   - {fileID: 7833122117494664109}
-  - {fileID: -339642376712113628}
-  m_RendererFeatureMap: ad6b866f10d7b46c24b267d10e5949fb
+  - {fileID: 2107488207379372328}
+  m_RendererFeatureMap: ad6b866f10d7b46c28192cd15b4d3f1d
   m_UseNativeRenderPass: 1
   xrSystemData: {fileID: 0}
   postProcessData: {fileID: 11400000, guid: 41439944d30ece34e96484bdb6645b55, type: 2}
@@ -83,6 +56,34 @@ MonoBehaviour:
   m_DepthTextureFormat: 0
   m_AccurateGbufferNormals: 0
   m_IntermediateTextureMode: 0
+--- !u!114 &2107488207379372328
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 0}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 2efb873835be6ba48935ac0783eaf41b, type: 3}
+  m_Name: LightweightOutlineFeature
+  m_EditorClassIdentifier: Assembly-CSharp::LightweightOutlineFeature
+  m_Active: 1
+  settings:
+    layerProfiles:
+    - renderingLayer: 1
+      color: {r: 11.313708, g: 0, b: 0, a: 1}
+      occlusionMode: 1
+      width: 5
+    - renderingLayer: 2
+      color: {r: 1, g: 0.75357646, b: 0, a: 1}
+      occlusionMode: 1
+      width: 5
+    - renderingLayer: 3
+      color: {r: 0, g: 1, b: 0.6545744, a: 1}
+      occlusionMode: 1
+      width: 5
+    renderPassEvent: 550
 --- !u!114 &7833122117494664109
 MonoBehaviour:
   m_ObjectHideFlags: 0
