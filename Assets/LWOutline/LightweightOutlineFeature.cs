@@ -398,15 +398,16 @@ public class LightweightOutlineFeature : ScriptableRendererFeature
             outlineMaterial.SetColorArray(LayerColorID, cachedColors);
             outlineMaterial.SetVectorArray(LayerWidthID, cachedWidths);
 
+            // Per-layer occlusion karari artik Composite pass'te
+            // (outlineMaterial) uygulaniyor - Mask pass'te DEGIL, cunku
+            // mask'in TAM/kesintisiz siluet olarak kalmasi JFA'nin
+            // dugumlenme/cift-outline artifact'i uretmemesi icin sart.
+            outlineMaterial.SetVectorArray(LayerDepthTestID, cachedDepthTest);
+
             // Mesafe kesme islemi Mask pass'te (maskMaterial) yapiliyor,
             // boylece uzaktaki objeler icin JFA/Composite'e hic seed
             // gitmiyor.
             maskMaterial.SetVectorArray(LayerRenderDistanceID, cachedRenderDistance);
-
-            // Per-layer depth test (occlusion) ayari da Mask pass'te
-            // uygulaniyor: occluded olan piksel mask'a hic yazilmiyor,
-            // boylece JFA/Composite o pikseli hic gormuyor.
-            maskMaterial.SetVectorArray(LayerDepthTestID, cachedDepthTest);
         }
 
         // =========================================================
@@ -501,7 +502,10 @@ public class LightweightOutlineFeature : ScriptableRendererFeature
             maskDescriptor.height = scaledH;
             maskDescriptor.msaaSamples = 1;
             maskDescriptor.depthBufferBits = 0;
-            maskDescriptor.colorFormat = RenderTextureFormat.R8;
+            // R = layerID/255, G = o siluet noktasinin kendi device-space
+            // derinligi (Composite'teki per-segment occlusion kontrolu
+            // icin). Tek kanal yetmedigi icin R8'den RGFloat'a gecildi.
+            maskDescriptor.colorFormat = RenderTextureFormat.RGFloat;
             maskDescriptor.sRGB = false;
 
             TextureHandle maskTexture = UniversalRenderer.CreateRenderGraphTexture(
@@ -555,16 +559,6 @@ public class LightweightOutlineFeature : ScriptableRendererFeature
 
                 builder.UseRendererList(passData.rendererList);
                 builder.SetRenderAttachment(maskTexture, 0, AccessFlags.Write);
-
-                // Per-layer depth test icin sahne depth'ini fragment
-                // shader'da manuel sample edecegiz; RenderGraph'a bu
-                // bagimliligi bildirmemiz gerekiyor ki dogru sirada
-                // hazir olsun ve culling ile atilmasin.
-                if (cameraDepthTexture.IsValid())
-                {
-                    builder.UseTexture(cameraDepthTexture, AccessFlags.Read);
-                }
-
                 builder.SetGlobalTextureAfterPass(maskTexture, OutlineMaskID);
                 builder.AllowPassCulling(false);
 
@@ -660,6 +654,15 @@ public class LightweightOutlineFeature : ScriptableRendererFeature
                 builder.UseTexture(passData.source, AccessFlags.Read);
                 builder.UseGlobalTexture(OutlineMaskID, AccessFlags.Read);
                 builder.UseGlobalTexture(JfaSeedID, AccessFlags.Read);
+
+                // Composite pass, per-layer occlusion karari icin sahne
+                // depth texture'ini (_CameraDepthTexture) sample ediyor -
+                // RenderGraph'a bu bagimliligi burada bildiriyoruz.
+                if (cameraDepthTexture.IsValid())
+                {
+                    builder.UseTexture(cameraDepthTexture, AccessFlags.Read);
+                }
+
                 builder.SetRenderAttachment(destination, 0, AccessFlags.Write);
                 builder.AllowPassCulling(false);
 

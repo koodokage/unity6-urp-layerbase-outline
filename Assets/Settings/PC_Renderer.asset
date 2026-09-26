@@ -72,45 +72,45 @@ MonoBehaviour:
   settings:
     layerProfiles:
     - layerName: Layer 1
-      renderingLayer: 4
+      renderingLayer: 1
       color: {r: 0.7490197, g: 0, b: 0, a: 1}
       width: 5
-      renderDistance: 4
+      renderDistance: 100
       depthTest: 1
       depthBias: 0.05
     - layerName: Layer 2
       renderingLayer: 2
       color: {r: 0.7490196, g: 0.6755303, b: 0, a: 1}
       width: 5
-      renderDistance: 1
-      depthTest: 0
+      renderDistance: 100
+      depthTest: 1
       depthBias: 0.05
     - layerName: Layer 3
       renderingLayer: 3
       color: {r: 0.1433331, g: 0.7490196, b: 0, a: 1}
       width: 5
-      renderDistance: 5
+      renderDistance: 100
       depthTest: 1
       depthBias: 0.05
     - layerName: Layer 4
       renderingLayer: 4
       color: {r: 0.7490196, g: 0, b: 0.6740595, a: 1}
       width: 5
-      renderDistance: 5
+      renderDistance: 100
       depthTest: 1
       depthBias: 0.05
     - layerName: Layer 5
       renderingLayer: 5
       color: {r: 0.013569952, g: 0, b: 0.7490196, a: 1}
       width: 5
-      renderDistance: 5
+      renderDistance: 100
       depthTest: 1
       depthBias: 0.05
     - layerName: Layer 6
       renderingLayer: 6
       color: {r: 0.7490196, g: 0.121036835, b: 0, a: 1}
       width: 5
-      renderDistance: 5
+      renderDistance: 100
       depthTest: 1
       depthBias: 0.05
     resolutionScale: 1
