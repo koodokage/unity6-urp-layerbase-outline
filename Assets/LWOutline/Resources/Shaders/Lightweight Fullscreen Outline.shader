@@ -1,4 +1,4 @@
-Shader "Hidden/Lightweight Outline"
+Shader "Hidden/Lightweight Fullscreen Outline"
 {
     SubShader
     {

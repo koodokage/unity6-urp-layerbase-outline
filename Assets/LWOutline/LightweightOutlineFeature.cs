@@ -108,7 +108,7 @@ public class LightweightOutlineFeature : ScriptableRendererFeature
     public override void Create()
     {
         Shader shader =
-            Shader.Find("Hidden/Lightweight Outline");
+            Shader.Find("Hidden/Lightweight Fullscreen Outline");
 
         if (shader == null)
         {
