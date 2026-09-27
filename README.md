@@ -3,8 +3,9 @@
 A lightweight fullscreen outline effect for Unity 6 Universal Render Pipeline (URP). This project uses a Render Layer Mask-based selection system and a Jump Flood Algorithm (JFA) to generate clean outlines around specific objects in the scene.
 
 ## Performance
-Apple Macbook M1
+Machine: Apple MacBook M1 (2019)
 Scene: 500 Primitive Objects
+Resolution: Full HD
 With Outline : 167 FPS
 Without Outline : 197 FPS
 
