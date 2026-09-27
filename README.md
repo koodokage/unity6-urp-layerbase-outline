@@ -13,6 +13,10 @@ A lightweight fullscreen outline effect for Unity 6 Universal Render Pipeline (U
 - Resolution scaling for performance tuning
 - URP ScriptableRendererFeature integration
 
+- ## About Additive LWRendererOutline
+
+**LWRendererOutline** is an optimized, lightweight alternative outline solution that uses a transparent back-face rendering technique, which you add as an extra material to the existing URP renderer component.
+
 ## Sample Scene
 
 The project includes a ready-to-use sample scene:
@@ -70,6 +74,7 @@ Assets/
     Resources/
       Shaders/
         Lightweight Fullscreen Outline.shader
+        LWRendererOutline.shader
   Scenes/
     SampleScene.unity
   Settings/
