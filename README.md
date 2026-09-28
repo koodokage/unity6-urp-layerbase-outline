@@ -11,6 +11,8 @@ A lightweight fullscreen outline effect for Unity 6 Universal Render Pipeline (U
 
 <img width="1832" height="986" alt="ezgif com-gif-maker" src="https://github.com/user-attachments/assets/b0aec635-4940-4711-a9b1-c09052d78805" />
 
+<img width="1434" height="759" alt="image" src="https://github.com/user-attachments/assets/cd9e3d12-ee04-47c8-a844-2a4b0a1fcfdf" />
+
 ## Features
 
 - Render Layer Mask-based object selection
@@ -22,7 +24,7 @@ A lightweight fullscreen outline effect for Unity 6 Universal Render Pipeline (U
 - Resolution scaling for performance tuning
 - URP ScriptableRendererFeature integration
 
-- ## About Additive LWRendererOutline
+- ## [Extra] Additive LWRendererOutline
 
 **LWRendererOutline** is an optimized, lightweight alternative outline solution that uses a transparent back-face rendering technique, which you add as an extra material to the existing URP renderer component.
 
@@ -70,9 +72,6 @@ Each layer can be configured with:
 
 This is handled by the `LightweightOutlineFeature` renderer feature.
 
-## Known Limitation
-
-If multiple layer outlines overlap in the same composite pass, the intersection areas may lose outline coverage because the final pass blends them together in a single result.
 
 ## Project Structure
 
