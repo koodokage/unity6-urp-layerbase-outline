@@ -1,15 +1,14 @@
 using System;
 using System.Collections.Generic;
 using UnityEngine;
+using UnityEngine.Experimental.Rendering;
 using UnityEngine.Rendering;
 using UnityEngine.Rendering.RenderGraphModule;
 using UnityEngine.Rendering.Universal;
 
 public class LightweightOutlineFeature : ScriptableRendererFeature
 {
-    // =============================================================
-    // LAYER PROFILE
-    // =============================================================
+    // LAYER PROFILE =============================================================
 
     [Serializable]
     public class OutlineLayerProfile
@@ -35,25 +34,21 @@ public class LightweightOutlineFeature : ScriptableRendererFeature
         public float renderDistance = 0f;
 
         [Tooltip(
-            "Acik: bu layer normal derinlik testi kullanir; obje baska bir " +
-            "seyin (duvar vb.) arkasina girdiginde outline kaybolur.\n" +
-            "Kapali: X-Ray modu; outline derinlikten bagimsiz her zaman gorunur."
+            "Acik: normal derinlik testi; obje baska bir seyin arkasina " +
+            "girince outline kaybolur.\n" +
+            "Kapali: X-Ray; outline derinlikten bagimsiz her zaman gorunur."
         )]
         public bool depthTest = true;
 
         [Tooltip(
             "Depth Test acikken kullanilan bias (world units, metre). " +
-            "Mask pass dusuk cozunurlukte calistigi icin siluet kenarlarinda " +
-            "olusabilecek yanlis-occlusion titremesini onlemek icin kucuk " +
-            "bir tolerans eklenir."
+            "Kendi-kendini-occlude etme titremesini onler."
         )]
         [Min(0f)]
         public float depthBias = 0.05f;
     }
 
-    // =============================================================
-    // SETTINGS
-    // =============================================================
+    // SETTINGS =============================================================
 
     [Serializable]
     public class Settings
@@ -61,28 +56,29 @@ public class LightweightOutlineFeature : ScriptableRendererFeature
         [Header("Rendering Layers")]
 
         [Tooltip(
-            "Outline cizilecek her Rendering Layer icin bir profil " +
-            "ekleyin. Rendering Layer Mask buradan otomatik hesaplanir."
+            "Outline cizilecek her Rendering Layer icin bir profil ekleyin. " +
+            "Ayarlar CPU'da BIR KEZ onbellege alinir (Create / editor'de " +
+            "her kare degil). Runtime'da profil degistirirseniz " +
+            "RefreshProfiles() cagirin."
         )]
         public List<OutlineLayerProfile> layerProfiles = new();
 
         [Header("Performance")]
 
         [Tooltip(
-            "Mask / depth / Jump-Flood hesaplamalarinin yapildigi cozunurluk " +
-            "(kamera hedefine oranla). Dusuk deger = cok daha hizli, " +
-            "kenarlar biraz daha yumusak/kaba olur. Composite her zaman " +
-            "tam cozunurlukte yapilir."
+            "Mask / JFA cozunurlugu (kamera hedefine oranla). Dusuk = daha " +
+            "hizli, kenarlar daha kaba. Composite tam cozunurlukte, " +
+            "sadece outline piksellerine yazar."
         )]
         [Range(0.25f, 1f)]
         public float resolutionScale = 0.5f;
 
         [Tooltip(
-            "JFA sonunda kalite icin eklenen ekstra step=1 duzeltme pass sayisi. " +
-            "0-2 arasi genelde yeterli."
+            "JFA sonuna eklenen ekstra step=1 duzeltme pass sayisi. " +
+            "0 = en hizli (onerilir). Her ekstra pass ~1 fullscreen pass demek."
         )]
         [Range(0, 2)]
-        public int extraRefinementPasses = 1;
+        public int extraRefinementPasses = 0;
 
         [Header("Render Pass")]
 
@@ -90,9 +86,7 @@ public class LightweightOutlineFeature : ScriptableRendererFeature
             RenderPassEvent.BeforeRenderingPostProcessing;
     }
 
-    // =============================================================
-    // FEATURE
-    // =============================================================
+    // FEATURE =============================================================
 
     public Settings settings = new();
 
@@ -101,49 +95,113 @@ public class LightweightOutlineFeature : ScriptableRendererFeature
 
     private LightweightOutlinePass outlinePass;
 
-    // =============================================================
-    // CREATE
-    // =============================================================
+    // ---- Onbellege alinmis profil verisi (her karede yeniden hesaplanmaz)
+    private readonly Color[] cachedColors = new Color[32];
+    private readonly Vector4[] cachedWidths = new Vector4[32];
+    private readonly Vector4[] cachedRenderDistance = new Vector4[32];
+    private readonly Vector4[] cachedDepthTest = new Vector4[32];
+    private uint cachedLayerMask;
+    private float cachedMaxWidth;
+
+    private static readonly int LayerColorID = Shader.PropertyToID("_LayerColors");
+    private static readonly int LayerWidthID = Shader.PropertyToID("_LayerWidths");
+    private static readonly int LayerRenderDistanceID = Shader.PropertyToID("_LayerRenderDistance");
+    private static readonly int LayerDepthTestID = Shader.PropertyToID("_LayerDepthTest");
+
+    // CREATE =============================================================
 
     public override void Create()
     {
-        Shader shader =
-            Shader.Find("Hidden/Lightweight Fullscreen Outline");
+        // Editor'de Create tekrar cagrilabilir; eskileri temizle.
+        if (outlinePass != null)
+        {
+            outlinePass.Dispose();
+            outlinePass = null;
+        }
+
+        CoreUtils.Destroy(outlineMaterial);
+        CoreUtils.Destroy(maskMaterial);
+
+        Shader shader = Shader.Find("Hidden/Lightweight Fullscreen Outline");
 
         if (shader == null)
         {
-            Debug.LogError(
-                "Lightweight Outline shader not found."
-            );
-
+            Debug.LogError("Lightweight Outline shader not found.");
             return;
         }
 
-        outlineMaterial =
-            CoreUtils.CreateEngineMaterial(shader);
+        outlineMaterial = CoreUtils.CreateEngineMaterial(shader);
+        maskMaterial = CoreUtils.CreateEngineMaterial(shader);
 
-        maskMaterial =
-            CoreUtils.CreateEngineMaterial(shader);
+        outlinePass = new LightweightOutlinePass(outlineMaterial, maskMaterial);
+        outlinePass.renderPassEvent = settings.renderPassEvent;
 
-        outlinePass =
-            new LightweightOutlinePass(
-                outlineMaterial,
-                maskMaterial
-            );
-
-        outlinePass.renderPassEvent =
-            settings.renderPassEvent;
-
-        // Per-layer depth test icin Mask pass'te _CameraDepthTexture
-        // sample ediyoruz; bu, URP Asset'teki "Depth Texture" checkbox'i
-        // kapali olsa bile gerekli copy-depth pass'inin calismasini
-        // garanti eder.
+        // Composite, per-layer occlusion icin _CameraDepthTexture okuyor.
         outlinePass.ConfigureInput(ScriptableRenderPassInput.Depth);
+
+        RefreshProfiles();
     }
 
     // =============================================================
-    // ADD PASS
+    // PROFILE CACHE
+    // Profil verisini BIR KEZ hesaplayip material'lere yazar. Runtime'da
+    // layerProfiles'i script'ten degistirirseniz bunu cagirin.
     // =============================================================
+
+    public void RefreshProfiles()
+    {
+        if (outlineMaterial == null || maskMaterial == null)
+            return;
+
+        for (int i = 0; i < 32; i++)
+        {
+            cachedColors[i] = Color.white;
+            cachedWidths[i] = new Vector4(2f, 0f, 0f, 0f);
+            cachedRenderDistance[i] = Vector4.zero;
+            cachedDepthTest[i] = new Vector4(0f, 0.05f, 0f, 0f);
+        }
+
+        cachedLayerMask = 0u;
+        cachedMaxWidth = 0f;
+
+        List<OutlineLayerProfile> profiles = settings.layerProfiles;
+
+        if (profiles != null)
+        {
+            for (int i = 0; i < profiles.Count; i++)
+            {
+                OutlineLayerProfile p = profiles[i];
+
+                int layer = Mathf.Clamp(p.renderingLayer, 0, 31);
+                float width = Mathf.Max(0.5f, p.width);
+
+                cachedLayerMask |= (1u << layer);
+                cachedMaxWidth = Mathf.Max(cachedMaxWidth, width);
+
+                cachedColors[layer] = p.color;
+
+                // Vector4 array: scalar float array 16 byte hizalama
+                // sorununu onler (x = deger).
+                cachedWidths[layer] = new Vector4(width, 0f, 0f, 0f);
+                cachedRenderDistance[layer] =
+                    new Vector4(Mathf.Max(0f, p.renderDistance), 0f, 0f, 0f);
+
+                // x = depth test (1/0), y = bias
+                cachedDepthTest[layer] = new Vector4(
+                    p.depthTest ? 1f : 0f,
+                    Mathf.Max(0f, p.depthBias),
+                    0f, 0f);
+            }
+        }
+
+        outlineMaterial.SetColorArray(LayerColorID, cachedColors);
+        outlineMaterial.SetVectorArray(LayerWidthID, cachedWidths);
+        outlineMaterial.SetVectorArray(LayerDepthTestID, cachedDepthTest);
+
+        maskMaterial.SetVectorArray(LayerRenderDistanceID, cachedRenderDistance);
+    }
+
+   // ADD PASS =============================================================
 
     public override void AddRenderPasses(
         ScriptableRenderer renderer,
@@ -152,67 +210,39 @@ public class LightweightOutlineFeature : ScriptableRendererFeature
         if (outlinePass == null)
             return;
 
-        if (settings.layerProfiles == null ||
-            settings.layerProfiles.Count == 0)
-        {
+        if (settings.layerProfiles == null || settings.layerProfiles.Count == 0)
             return;
-        }
 
         if (renderingData.cameraData.isPreviewCamera)
             return;
 
-        CameraType cameraType =
-            renderingData.cameraData.cameraType;
+        CameraType cameraType = renderingData.cameraData.cameraType;
 
-        if (cameraType != CameraType.Game &&
-            cameraType != CameraType.SceneView)
-        {
-            return;
-        }
-
-        // =====================================================
-        // MASK LISTEDEN OTOMATIK HESAPLANIR
-        // =====================================================
-
-        uint renderingLayerMask = 0u;
-        float maxWidth = 0f;
-
-        for (int i = 0; i < settings.layerProfiles.Count; i++)
-        {
-            int layer =
-                Mathf.Clamp(
-                    settings.layerProfiles[i].renderingLayer,
-                    0,
-                    31
-                );
-
-            renderingLayerMask |=
-                (1u << layer);
-
-            maxWidth =
-                Mathf.Max(maxWidth, settings.layerProfiles[i].width);
-        }
-
-        if (renderingLayerMask == 0u)
+        if (cameraType != CameraType.Game && cameraType != CameraType.SceneView)
             return;
 
-        outlinePass.renderPassEvent =
-            settings.renderPassEvent;
+#if UNITY_EDITOR
+        // Editor'de inspector degisiklikleri aninda yansisin.
+        // Build'de bu satir derlenmez: sifir CPU maliyeti.
+        RefreshProfiles();
+#endif
+
+        if (cachedLayerMask == 0u)
+            return;
+
+        outlinePass.renderPassEvent = settings.renderPassEvent;
 
         outlinePass.Setup(
-            renderingLayerMask,
-            settings.layerProfiles,
+            cachedLayerMask,
+            Mathf.Max(1f, cachedMaxWidth),
             Mathf.Clamp(settings.resolutionScale, 0.25f, 1f),
-            Mathf.Max(1f, maxWidth),
             Mathf.Clamp(settings.extraRefinementPasses, 0, 2)
         );
 
         renderer.EnqueuePass(outlinePass);
     }
 
-    // =============================================================
-    // DISPOSE
-    // =============================================================
+   // DISPOSE =============================================================
 
     protected override void Dispose(bool disposing)
     {
@@ -228,10 +258,8 @@ public class LightweightOutlineFeature : ScriptableRendererFeature
         outlineMaterial = null;
         maskMaterial = null;
     }
-
-    // =============================================================
-    // PASS
-    // =============================================================
+    
+    // PASS =============================================================
 
     private class LightweightOutlinePass : ScriptableRenderPass
     {
@@ -239,18 +267,11 @@ public class LightweightOutlineFeature : ScriptableRendererFeature
         private readonly Material maskMaterial;
 
         private uint renderingLayerMask;
-        private List<OutlineLayerProfile> layerProfiles;
-
-        private float resolutionScale = 0.5f;
         private float maxWidth = 8f;
-        private int extraRefinementPasses = 1;
+        private float resolutionScale = 0.5f;
+        private int extraRefinementPasses = 0;
 
-        // Her kare yeniden allocate etmemek icin cache'lenmis buffer'lar
-        private readonly Color[] cachedColors = new Color[32];
-        private readonly Vector4[] cachedWidths = new Vector4[32];
-        private readonly Vector4[] cachedRenderDistance = new Vector4[32];
-        private readonly Vector4[] cachedDepthTest = new Vector4[32];
-        private readonly List<int> cachedSteps = new List<int>(16);
+        private readonly List<int> cachedSteps = new List<int>(8);
 
         private static readonly List<ShaderTagId> ShaderTags = new List<ShaderTagId>
         {
@@ -259,43 +280,16 @@ public class LightweightOutlineFeature : ScriptableRendererFeature
             new ShaderTagId("SRPDefaultUnlit")
         };
 
-        // =========================================================
-        // SHADER PASS INDICES
-        // =========================================================
-
         private const int PassMask = 0;
         private const int PassJfaInit = 1;
         private const int PassJfaStep = 2;
         private const int PassComposite = 3;
 
-        // =========================================================
-        // SHADER IDS
-        // =========================================================
-
-        private static readonly int OutlineMaskID =
-            Shader.PropertyToID("_OutlineMask");
-
-        private static readonly int JfaSeedID =
-            Shader.PropertyToID("_JFASeedTex");
-
-        private static readonly int JfaStepID =
-            Shader.PropertyToID("_JFAStep");
-
-        private static readonly int LayerColorID =
-            Shader.PropertyToID("_LayerColors");
-
-        private static readonly int LayerWidthID =
-            Shader.PropertyToID("_LayerWidths");
-
-        private static readonly int LayerRenderDistanceID =
-            Shader.PropertyToID("_LayerRenderDistance");
-
-        private static readonly int LayerDepthTestID =
-            Shader.PropertyToID("_LayerDepthTest");
-
-        // =========================================================
-        // PASS DATA
-        // =========================================================
+        private static readonly int OutlineMaskID = Shader.PropertyToID("_OutlineMask");
+        private static readonly int JfaSeedID = Shader.PropertyToID("_JFASeedTex");
+        private static readonly int JfaStepID = Shader.PropertyToID("_JFAStep");
+        private static readonly int JfaReachID = Shader.PropertyToID("_JFAReach");
+        private static readonly int MaskTexelID = Shader.PropertyToID("_OutlineMaskTexel");
 
         private class MaskPassData
         {
@@ -312,103 +306,28 @@ public class LightweightOutlineFeature : ScriptableRendererFeature
 
         private class CompositePassData
         {
-            public TextureHandle source;
             public Material material;
         }
 
-        // =========================================================
-        // CONSTRUCTOR
-        // =========================================================
-
-        public LightweightOutlinePass(
-            Material outlineMaterial,
-            Material maskMaterial)
+        public LightweightOutlinePass(Material outlineMaterial, Material maskMaterial)
         {
             this.outlineMaterial = outlineMaterial;
             this.maskMaterial = maskMaterial;
         }
 
-        // =========================================================
-        // SETUP
-        // =========================================================
-
         public void Setup(
             uint renderingLayerMask,
-            List<OutlineLayerProfile> layerProfiles,
-            float resolutionScale,
             float maxWidth,
+            float resolutionScale,
             int extraRefinementPasses)
         {
             this.renderingLayerMask = renderingLayerMask;
-            this.layerProfiles = layerProfiles;
-            this.resolutionScale = resolutionScale;
             this.maxWidth = maxWidth;
+            this.resolutionScale = resolutionScale;
             this.extraRefinementPasses = extraRefinementPasses;
         }
 
         public void Dispose() { }
-
-        // =========================================================
-        // PROFILE -> MATERIAL ARRAYS
-        // =========================================================
-
-        private void ApplyLayerProfiles()
-        {
-            for (int i = 0; i < 32; i++)
-            {
-                cachedColors[i] = Color.white;
-                cachedWidths[i] = new Vector4(2f, 0f, 0f, 0f);
-                cachedRenderDistance[i] = new Vector4(0f, 0f, 0f, 0f); // 0 = sinirsiz
-                cachedDepthTest[i] = new Vector4(0f, 0.05f, 0f, 0f); // x=0 (kapali/X-Ray), y=bias
-            }
-
-            if (layerProfiles != null)
-            {
-                for (int i = 0; i < layerProfiles.Count; i++)
-                {
-                    OutlineLayerProfile profile = layerProfiles[i];
-
-                    int layer = Mathf.Clamp(profile.renderingLayer, 0, 31);
-
-                    cachedColors[layer] = profile.color;
-
-                    float width = Mathf.Max(0.5f, profile.width);
-
-                    // Not: width'i tek basina float[] olarak gondermiyoruz,
-                    // cunku HLSL constant buffer'da scalar float array
-                    // elemanlari 16 byte'a hizalanir ama Unity'nin
-                    // SetFloatArray'i veriyi sikisik gonderir; bu da ilk
-                    // eleman disindaki degerlerin bozuk okunmasina yol
-                    // aciyor. Vector4 array (x = width) bu sorunu yasamaz.
-                    cachedWidths[layer] = new Vector4(width, 0f, 0f, 0f);
-
-                    cachedRenderDistance[layer] =
-                        new Vector4(Mathf.Max(0f, profile.renderDistance), 0f, 0f, 0f);
-
-                    // x = depth test acik mi (1/0), y = bias (world units)
-                    cachedDepthTest[layer] = new Vector4(
-                        profile.depthTest ? 1f : 0f,
-                        Mathf.Max(0f, profile.depthBias),
-                        0f,
-                        0f
-                    );
-                }
-            }
-
-            outlineMaterial.SetColorArray(LayerColorID, cachedColors);
-            outlineMaterial.SetVectorArray(LayerWidthID, cachedWidths);
-
-            // Per-layer occlusion karari artik Composite pass'te
-            // (outlineMaterial) uygulaniyor - Mask pass'te DEGIL, cunku
-            // mask'in TAM/kesintisiz siluet olarak kalmasi JFA'nin
-            // dugumlenme/cift-outline artifact'i uretmemesi icin sart.
-            outlineMaterial.SetVectorArray(LayerDepthTestID, cachedDepthTest);
-
-            // Mesafe kesme islemi Mask pass'te (maskMaterial) yapiliyor,
-            // boylece uzaktaki objeler icin JFA/Composite'e hic seed
-            // gitmiyor.
-            maskMaterial.SetVectorArray(LayerRenderDistanceID, cachedRenderDistance);
-        }
 
         // =========================================================
         // JFA STEP SIZES (N, N/2, ..., 1) + extra refinement (step=1)
@@ -426,12 +345,7 @@ public class LightweightOutlineFeature : ScriptableRendererFeature
         {
             cachedSteps.Clear();
 
-            // Genislik full-res piksel cinsinden; JFA texture'i scaled
-            // cozunurlukte oldugu icin ihtiyac duyulan yayilma yaricapini
-            // (texel cinsinden) scaled uzaya cevirmemiz gerekiyor.
-            int radiusTexels =
-                Mathf.CeilToInt(maxWidth * resolutionScale);
-
+            int radiusTexels = Mathf.CeilToInt(maxWidth * resolutionScale);
             radiusTexels = Mathf.Clamp(radiusTexels, 1, Mathf.Max(scaledWidth, scaledHeight));
 
             int n = NextPow2(radiusTexels);
@@ -445,43 +359,23 @@ public class LightweightOutlineFeature : ScriptableRendererFeature
             return cachedSteps;
         }
 
-        // =========================================================
-        // RENDER GRAPH
-        // =========================================================
+        // RENDER GRAPH =========================================================
 
         public override void RecordRenderGraph(
             RenderGraph renderGraph,
             ContextContainer frameData)
         {
-            UniversalResourceData resourceData =
-                frameData.Get<UniversalResourceData>();
-
-            UniversalRenderingData renderingData =
-                frameData.Get<UniversalRenderingData>();
-
-            UniversalCameraData cameraData =
-                frameData.Get<UniversalCameraData>();
-
-            UniversalLightData lightData =
-                frameData.Get<UniversalLightData>();
+            UniversalResourceData resourceData = frameData.Get<UniversalResourceData>();
+            UniversalRenderingData renderingData = frameData.Get<UniversalRenderingData>();
+            UniversalCameraData cameraData = frameData.Get<UniversalCameraData>();
+            UniversalLightData lightData = frameData.Get<UniversalLightData>();
 
             if (resourceData.isActiveTargetBackBuffer)
                 return;
 
-            // Mask pass (mesafe/derinlik kesme) ve Composite pass
-            // (renk/genislik) materyal ozelliklerine ihtiyac duydugu icin
-            // herhangi bir pass eklenmeden once uygulanmali.
-            ApplyLayerProfiles();
-
-            TextureHandle source = resourceData.activeColorTexture;
-
-            // Per-layer depth test icin sahne depth texture'ina ihtiyacimiz
-            // var (Opaque pass'ten sonra populate edilmis olmali - bu yuzden
-            // renderPassEvent varsayilani BeforeRenderingPostProcessing).
-            // Mask pass'te bunu bir depth-stencil ATTACHMENT olarak degil,
-            // fragment shader icinde SampleSceneDepth() ile TEXTURE olarak
-            // okuyoruz (_CameraDepthTexture) - bu yuzden dogru RenderGraph
-            // resource'u activeDepthTexture degil, cameraDepthTexture'dir.
+            // Composite DOGRUDAN kamera rengine blend eder: full-res kopya
+            // hedefi yok, sahne rengi okunmuyor.
+            TextureHandle colorTarget = resourceData.activeColorTexture;
             TextureHandle cameraDepthTexture = resourceData.cameraDepthTexture;
 
             RenderTextureDescriptor fullDesc = cameraData.cameraTargetDescriptor;
@@ -489,38 +383,42 @@ public class LightweightOutlineFeature : ScriptableRendererFeature
             int scaledW = Mathf.Max(1, Mathf.RoundToInt(fullDesc.width * resolutionScale));
             int scaledH = Mathf.Max(1, Mathf.RoundToInt(fullDesc.height * resolutionScale));
 
-            // =====================================================
-            // MASK (scaled res). Per-layer depth test artik Mask pass
-            // icinde, _CameraDepthTexture manuel sample edilerek
-            // uygulaniyor (hardware ZTest attachment DEGIL, cunku mask
-            // hedefi scaled cozunurlukte ve gercek depth buffer'la
-            // boyut olarak eslesmiyor).
-            // =====================================================
+            // Kamera basina degisen (boyut'a bagli) sabitler.
+            outlineMaterial.SetFloat(JfaReachID, (maxWidth + 1f) * resolutionScale);
+            outlineMaterial.SetVector(
+                MaskTexelID,
+                new Vector4(1f / scaledW, 1f / scaledH, scaledW, scaledH));
 
+            // ---- Mask: R = layerID/255, G = device depth
             RenderTextureDescriptor maskDescriptor = fullDesc;
             maskDescriptor.width = scaledW;
             maskDescriptor.height = scaledH;
             maskDescriptor.msaaSamples = 1;
             maskDescriptor.depthBufferBits = 0;
-            // R = layerID/255, G = o siluet noktasinin kendi device-space
-            // derinligi (Composite'teki per-segment occlusion kontrolu
-            // icin). Tek kanal yetmedigi icin R8'den RGFloat'a gecildi.
             maskDescriptor.colorFormat = RenderTextureFormat.RGFloat;
             maskDescriptor.sRGB = false;
 
             TextureHandle maskTexture = UniversalRenderer.CreateRenderGraphTexture(
                 renderGraph, maskDescriptor, "Lightweight Outline Mask", false);
 
-            // =====================================================
-            // JFA PING-PONG (scaled res, RGFloat = seed UV, x<0 => empty)
-            // =====================================================
+            RenderTextureDescriptor maskDepthDescriptor = maskDescriptor;
+            maskDepthDescriptor.graphicsFormat = GraphicsFormat.None;
+            maskDepthDescriptor.depthStencilFormat = GraphicsFormat.D32_SFloat;
+            maskDepthDescriptor.depthBufferBits = 32;
 
+            TextureHandle maskDepthTexture = UniversalRenderer.CreateRenderGraphTexture(
+                renderGraph, maskDepthDescriptor, "Lightweight Outline Mask Depth", false);
+
+            // ---- JFA: RGBAHalf (8 byte/piksel; onceki RGBAFloat'in yarisi).
+            // xy = "bosluga bakan" seed, zw = "uzaktaki baska layer'a bakan"
+            // seed. Degerler MUTLAK UV degil, kendi pikselinden seed'e TEXEL
+            // OFSETI (kucuk tam sayilar => half'ta tam hassasiyet).
             RenderTextureDescriptor jfaDescriptor = fullDesc;
             jfaDescriptor.width = scaledW;
             jfaDescriptor.height = scaledH;
             jfaDescriptor.msaaSamples = 1;
             jfaDescriptor.depthBufferBits = 0;
-            jfaDescriptor.colorFormat = RenderTextureFormat.RGFloat;
+            jfaDescriptor.colorFormat = RenderTextureFormat.ARGBHalf;
             jfaDescriptor.sRGB = false;
 
             TextureHandle jfaA = UniversalRenderer.CreateRenderGraphTexture(
@@ -529,28 +427,21 @@ public class LightweightOutlineFeature : ScriptableRendererFeature
             TextureHandle jfaB = UniversalRenderer.CreateRenderGraphTexture(
                 renderGraph, jfaDescriptor, "Lightweight Outline JFA B", false);
 
-            // =====================================================
-            // FILTERING / DRAWING SETTINGS
-            // =====================================================
-
+            // ---- Mask renderer list (siralama yok, per-object veri yok)
             FilteringSettings filteringSettings = new FilteringSettings(
                 RenderQueueRange.all, -1, renderingLayerMask, 0);
 
-            SortingCriteria sortingCriteria = cameraData.defaultOpaqueSortFlags;
-
             DrawingSettings drawingSettings = RenderingUtils.CreateDrawingSettings(
-                ShaderTags, renderingData, cameraData, lightData, sortingCriteria);
+                ShaderTags, renderingData, cameraData, lightData, SortingCriteria.None);
 
-            // ---- Mask renderer list
+            drawingSettings.perObjectData = PerObjectData.None;
             drawingSettings.overrideMaterial = maskMaterial;
             drawingSettings.overrideMaterialPassIndex = PassMask;
 
             RendererListHandle maskRendererList = renderGraph.CreateRendererList(
                 new RendererListParams(renderingData.cullResults, drawingSettings, filteringSettings));
 
-            // =====================================================
-            // MASK PASS
-            // =====================================================
+            // MASK PASS =====================================================
 
             using (var builder = renderGraph.AddRasterRenderPass<MaskPassData>(
                 "Lightweight Outline - Mask", out var passData))
@@ -559,19 +450,18 @@ public class LightweightOutlineFeature : ScriptableRendererFeature
 
                 builder.UseRendererList(passData.rendererList);
                 builder.SetRenderAttachment(maskTexture, 0, AccessFlags.Write);
+                builder.SetRenderAttachmentDepth(maskDepthTexture, AccessFlags.Write);
                 builder.SetGlobalTextureAfterPass(maskTexture, OutlineMaskID);
                 builder.AllowPassCulling(false);
 
                 builder.SetRenderFunc(static (MaskPassData data, RasterGraphContext context) =>
                 {
-                    context.cmd.ClearRenderTarget(false, true, Color.black);
+                    context.cmd.ClearRenderTarget(true, true, Color.black);
                     context.cmd.DrawRendererList(data.rendererList);
                 });
             }
 
-            // =====================================================
-            // JFA INIT: maskTexture -> jfaA (seed = kendi UV'si ya da -1,-1)
-            // =====================================================
+            // JFA INIT =====================================================
 
             using (var builder = renderGraph.AddRasterRenderPass<JfaBlitPassData>(
                 "Lightweight Outline - JFA Init", out var passData))
@@ -591,9 +481,7 @@ public class LightweightOutlineFeature : ScriptableRendererFeature
                 });
             }
 
-            // =====================================================
-            // JFA STEPS (ping-pong jfaA <-> jfaB)
-            // =====================================================
+            // JFA STEPS =====================================================
 
             List<int> steps = BuildStepSizes(scaledW, scaledH);
 
@@ -613,6 +501,7 @@ public class LightweightOutlineFeature : ScriptableRendererFeature
                     passData.step = stepSize;
 
                     builder.UseTexture(passData.source, AccessFlags.Read);
+                    builder.UseGlobalTexture(OutlineMaskID, AccessFlags.Read);
                     builder.SetRenderAttachment(jfaDst, 0, AccessFlags.Write);
                     builder.AllowGlobalStateModification(true);
 
@@ -632,48 +521,33 @@ public class LightweightOutlineFeature : ScriptableRendererFeature
                 (jfaSrc, jfaDst) = (jfaDst, jfaSrc);
             }
 
-            // _JFASeedTex global'i artik son JFA step'in ciktisina isaret ediyor.
-
             // =====================================================
-            // COMPOSITE (full res)
+            // COMPOSITE: kamera rengine dogrudan alpha-blend.
+            // Ayri full-res hedef yok, sahne rengi okunmuyor; outline
+            // olmayan pikseller shader'da discard ile atiliyor.
             // =====================================================
-
-            RenderTextureDescriptor destinationDescriptor = fullDesc;
-            destinationDescriptor.msaaSamples = 1;
-            destinationDescriptor.depthBufferBits = 0;
-
-            TextureHandle destination = UniversalRenderer.CreateRenderGraphTexture(
-                renderGraph, destinationDescriptor, "Lightweight Outline Result", false);
 
             using (var builder = renderGraph.AddRasterRenderPass<CompositePassData>(
                 "Lightweight Outline - Composite", out var passData))
             {
-                passData.source = source;
                 passData.material = outlineMaterial;
 
-                builder.UseTexture(passData.source, AccessFlags.Read);
                 builder.UseGlobalTexture(OutlineMaskID, AccessFlags.Read);
                 builder.UseGlobalTexture(JfaSeedID, AccessFlags.Read);
 
-                // Composite pass, per-layer occlusion karari icin sahne
-                // depth texture'ini (_CameraDepthTexture) sample ediyor -
-                // RenderGraph'a bu bagimliligi burada bildiriyoruz.
                 if (cameraDepthTexture.IsValid())
-                {
                     builder.UseTexture(cameraDepthTexture, AccessFlags.Read);
-                }
 
-                builder.SetRenderAttachment(destination, 0, AccessFlags.Write);
+                builder.SetRenderAttachment(colorTarget, 0, AccessFlags.ReadWrite);
                 builder.AllowPassCulling(false);
 
                 builder.SetRenderFunc(static (CompositePassData data, RasterGraphContext context) =>
                 {
-                    Blitter.BlitTexture(context.cmd, data.source, new Vector4(1, 1, 0, 0),
-                        data.material, PassComposite);
+                    context.cmd.DrawProcedural(
+                        Matrix4x4.identity, data.material, PassComposite,
+                        MeshTopology.Triangles, 3, 1);
                 });
             }
-
-            resourceData.cameraColor = destination;
         }
     }
 }
