@@ -28,6 +28,8 @@ A lightweight fullscreen outline effect for Unity 6 Universal Render Pipeline (U
 
 **LWRendererOutline** is an optimized, lightweight alternative outline solution that uses a transparent back-face rendering technique, which you add as an extra material to the existing URP renderer component.
 
+<img width="2539" height="887" alt="image" src="https://github.com/user-attachments/assets/a976f980-59b4-4d56-bd70-310cea9546b7" />
+
 ## Sample Scene
 
 The project includes a ready-to-use sample scene:
